@@ -4,7 +4,9 @@
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 
-static int do_k22tree(const char *input, size_t in_sz, char *output, size_t out_sz)
+#include <linux/list.h>
+
+static int do_k22tree(struct k22info* buf, int* ne)
 {
         return 0;
 }
