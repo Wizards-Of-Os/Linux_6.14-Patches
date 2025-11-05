@@ -3,9 +3,11 @@
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
-
-#include <linux/mutex.h>
+#include <linux/signal.h>
+#include <linux/spinlock.h>
+#include <linux/spinlock_types.h>
 #include <linux/list.h>
+#include <linux/pid.h>
 
 /* Summary of the Non-Recursive Pre-Order DFS algorithm 
 * Variables: 
@@ -30,8 +32,8 @@
 static void insert_proc(struct k22info* buf, struct task_struct* p, int i)
 {
         snprintf(buf[i].comm, sizeof(buf[i].comm), "%s", p->comm);
-        buf[i].pid = p->pid;
-        buf[i].parent_pid = p->parent->pid;
+        buf[i].pid = task_pid_nr(p);
+        buf[i].parent_pid = task_pid_nr(p->parent);
         // TMP \/\/\/
         buf[i].first_child_pid = 0;
         buf[i].next_sibling_pid = 0;
@@ -49,7 +51,7 @@ static int do_k22tree(struct k22info* buf, int* ne)
         int flag;
         struct task_struct* p;
         struct k22info* proc_buf;
-        struct mutex my_mutex; // tmp name
+        rwlock_t mylock; // tmp name
         
         pnum = 0;
         for_each_process(p)
@@ -63,11 +65,15 @@ static int do_k22tree(struct k22info* buf, int* ne)
         flag = 0;
         p = &init_task;
         i = 0;
-        mutex_init(&my_mutex);
-        mutex_lock(&my_mutex);
+
+        rwlock_init(&mylock);
+
+        read_lock(&mylock);
+
         do {
+                //check pnum
                 if (list_empty(&(p->children)) || (flag == 1)) {
-                        if ((p->sibling).next == (p->parent->children).next) {
+                        if (task_pid_nr(list_next_entry(p, sibling)) == task_pid_nr(list_next_entry(p->parent, children))) {
                                 flag = 1;
                                 p = p->parent;
                         } else {
@@ -80,9 +86,10 @@ static int do_k22tree(struct k22info* buf, int* ne)
                         p = list_next_entry(p, children);
                 }
         } while ((p != &init_task) || (flag != 1));
-        mutex_unlock(&my_mutex);
+
+        read_unlock(&mylock);
         
-        if (copy_to_user(buf, proc_buf, i)) {
+        if (copy_to_user(buf, proc_buf, i*sizeof(*proc_buf))) { //Needs fixing on i 
                 return_value = -EFAULT;
                 goto free_pbuf;
         }
