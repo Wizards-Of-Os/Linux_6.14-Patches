@@ -54,6 +54,7 @@ static int do_k22tree(struct k22info *buf, int *ne)
 		return_value = -EINVAL;
 		goto out;
 	}
+
 	struct k22info *tmp_buff = kmalloc(420 * sizeof(*tmp_buff), GFP_KERNEL);
 	pnum = 1;
 	for_each_process(p)
@@ -62,6 +63,12 @@ static int do_k22tree(struct k22info *buf, int *ne)
 		return_value = -EFAULT;
 		goto out;
 	}
+
+	if (upbound <= 0) {
+		return_value = -EINVAL;
+		goto out;
+	}
+
 	buffer_size = (pnum <= upbound) ? pnum : upbound;
 	proc_buf = kmalloc((buffer_size) * sizeof(*proc_buf), GFP_KERNEL);
 	if (!proc_buf) {
@@ -131,6 +138,7 @@ static int do_k22tree(struct k22info *buf, int *ne)
 		pr_info("K22-TWOS | Name: %s, PID: %d, Next child PID: %d, Next sibling PID: %d, Parent PID: %d\n", tmp_buff[k].comm, tmp_buff[k].pid, tmp_buff[k].first_child_pid, tmp_buff[k].next_sibling_pid, tmp_buff[k].parent_pid);
 
 	read_unlock(&tasklist_lock);
+
 	if (copy_to_user(buf, proc_buf, i * sizeof(*proc_buf))) {//Needs fixing on i
 		return_value = -EFAULT;
 		goto free_pbuf;
