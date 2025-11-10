@@ -19,7 +19,7 @@ int main(void){
     int pnum , buf_size , ne ; 
 
     buf_size = ne = 100 ; 
-    struct k22info * buf = malloc(buf_size* sizeof(struct k22info));
+    struct k22info * buf = malloc(100* sizeof(struct k22info));
     if(!buf){
         fprintf(stderr , "Memory allocation failed\n");
         return 1 ; 
@@ -61,7 +61,7 @@ int main(void){
     struct k22info * proc ;
     depths[0] = 0 ; 
 
-    for(int i = 1 ; i <ne  ; i++){
+    for(int i = 1 ; i < pnum  ; i++){
         find_depth(buf , depths , i);
         for(int j = 0 ; j < depths[i] ; j++){
             printf(ANSI_COLOR_GREEN "-");
