@@ -27,7 +27,7 @@
  * regardless of the provided ne value.
  */
 
-// These macros return true is p1 is the sibling of p2, or child respectively
+// These macros return true if p1 is the sibling of p2, or child respectively
 #define is_sibling(p1, p2) \
 (parent_pid(p1) == parent_pid(p2))
 
@@ -129,7 +129,7 @@ static int do_k22tree(struct k22info *buf, int *ne)
 	 * for_each_process does not account for init_task, so pnum is initialized to 1
 	 *
 	 * After that, the required space is allocated.
-	 * If pnum < ne, an extra 10 spaces are allocated. This is done to
+	 * If pnum < ne, 10 extra spaces are allocated. This is done to
 	 * significantly reduce the number of times that a reallocation is needed.
 	 */
 	pnum = 1;
@@ -184,16 +184,17 @@ static int do_k22tree(struct k22info *buf, int *ne)
 	p_stack[0] = &init_task;
 	stack_i = 0;
 	i = 0;
+	// Start of DFS
 	do {
-		p = p_stack[stack_i--];
+		p = p_stack[stack_i--]; // Popping stack
 
 		/**
 		 * For this Pre-Order DFS implementation, the process that comes after p,
-		 * will always be the next sibling of it, unless that process is the parent of p,
+		 * will always be the next sibling of it, an unrelated process,
 		 * or p is the only process in the stack.
 		 * This is beacause, the next entry on, is the process that will be traversed,
 		 * after all the children of p have been explored. That will either be the
-		 * next sibling, the parent or none if p is the last element in the stack.
+		 * next sibling, an irrelevant task or none if p is the last element in the stack.
 		 */
 		if (stack_i >= 0) // Checks whether the stack is empty
 			if (is_sibling(p, p_stack[stack_i]))
