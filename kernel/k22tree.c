@@ -14,43 +14,49 @@
 #include <linux/sort.h>
 
 #define is_sibling(p1, p2) \
-parent_pid(p1) == parent_pid(p2)
+(parent_pid(p1) == parent_pid(p2))
 
 #define is_child(p1, p2) \
-task_pid_nr(p1) == parent_pid(p2)
+(task_pid_nr(p1) == parent_pid(p2))
 
 static int cmp_children(const void *ch1, const void *ch2)
 {
-	if (((struct task_struct*)ch1)->start_time > ((struct task_struct*)ch2)->start_time)
+	const struct task_struct *task1 = *(const struct task_struct **)ch1;
+	const struct task_struct *task2 = *(const struct task_struct **)ch2;
+
+	if (task1->start_time > task2->start_time)
 		return -1;
-	if (((struct task_struct*)ch1)->start_time < ((struct task_struct*)ch2)->start_time)
+	if (task1->start_time < task2->start_time)
 		return 1;
 	return 0;
 }
 
-static pid_t parent_pid(struct task_struct* p)
+static pid_t parent_pid(struct task_struct *p)
 {
-	return thread_group_leader(p->real_parent) ? task_pid_nr(p->real_parent) : task_pid_nr(p->real_parent->group_leader);
+	if (thread_group_leader(p->real_parent))
+		return task_pid_nr(p->real_parent);
+	return task_pid_nr(p->real_parent->group_leader);
 }
 
-static void insert_children_to_stack(struct task_struct *p, struct task_struct **p_stack, int *stack_index)
+static void insert_children(struct task_struct *p, struct task_struct **p_stack, int *stack_i)
 {
 	struct task_struct *curr_task;
 	struct task_struct *curr_child;
-	int stack_increase;
+	int stack_inc;
 
-	stack_increase = 0;
+	stack_inc = 0;
 	for_each_thread(p, curr_task) {
 		if (list_empty(&(curr_task->children)))
 			continue;
-		list_for_each_entry_reverse(curr_child, &(curr_task->children), sibling)
-			p_stack[*stack_index + (++stack_increase)] = curr_child;
+		list_for_each_entry(curr_child, &(curr_task->children), sibling)
+			p_stack[*stack_i + (++stack_inc)] = curr_child;
 	}
 
-	if (stack_increase > 1)
-		sort(&p_stack[*stack_index + 1], stack_increase, sizeof(struct task_struct*), cmp_children, NULL);
+	// Changed sizeof(struct task_struct *) to sizeof(*p_stack)
+	if (stack_inc > 1)
+		sort(&p_stack[*stack_i + 1], stack_inc, sizeof(*p_stack), cmp_children, NULL);
 
-	*stack_index += stack_increase;
+	*stack_i += stack_inc;
 }
 
 static void insert_rest(struct k22info *buf, struct task_struct *p, int i)
@@ -71,7 +77,7 @@ static int do_k22tree(struct k22info *buf, int *ne)
 	int buffer_size;
 	int new_buffer_size;
 	int upbound;
-	int stack_index;
+	int stack_i;
 	struct task_struct *p;
 	struct task_struct **p_stack;
 	struct k22info *proc_buf;
@@ -100,7 +106,7 @@ static int do_k22tree(struct k22info *buf, int *ne)
 		return_value = -ENOMEM;
 		goto out;
 	}
-	p_stack = kmalloc((buffer_size) * sizeof(struct task_struct*), GFP_KERNEL);
+	p_stack = kmalloc((buffer_size) * sizeof(struct task_struct *), GFP_KERNEL);
 	if (!p_stack) {
 		return_value = -ENOMEM;
 		goto free_pbuf;
@@ -123,41 +129,45 @@ static int do_k22tree(struct k22info *buf, int *ne)
 				return_value = -ENOMEM;
 				goto out;
 			}
-			p_stack = kmalloc((buffer_size) * sizeof(struct task_struct*), GFP_KERNEL);
+			p_stack = kmalloc((buffer_size) * sizeof(struct task_struct *), GFP_KERNEL);
 			if (!p_stack) {
 				return_value = -ENOMEM;
 				goto free_pbuf;
 			}
 			read_lock(&tasklist_lock);
 		} else {
-			pr_info("K22-TWOS | Buffer has the correct size. The upper limit is: %d and the buffer size: %d\n", upbound, buffer_size);
 			break;
 		}
 	} while (1);
 	p_stack[0] = &init_task;
 
-	stack_index = 0;
+	stack_i = 0;
 	i = 0;
 	do {
-		p = p_stack[stack_index--];
+		p = p_stack[stack_i--];
 
-		if (stack_index >= 0)
-			proc_buf[i].next_sibling_pid = is_sibling(p, p_stack[stack_index]) ? task_pid_nr(p_stack[stack_index]) : 0;
+		if (stack_i >= 0)
+			if (is_sibling(p, p_stack[stack_i]))
+				proc_buf[i].next_sibling_pid = task_pid_nr(p_stack[stack_i]);
+			else
+				proc_buf[i].next_sibling_pid = 0;
 		else
 			proc_buf[i].next_sibling_pid = 0;
 
 		insert_rest(proc_buf, p, i++);
-		insert_children_to_stack(p, p_stack, &stack_index);
+		insert_children(p, p_stack, &stack_i);
 
-		if (stack_index >= 0)
-			proc_buf[i - 1].first_child_pid = is_child(p, p_stack[stack_index]) ? task_pid_nr(p_stack[stack_index]) : 0;
+		if (stack_i >= 0)
+			if (is_child(p, p_stack[stack_i]))
+				proc_buf[i - 1].first_child_pid = task_pid_nr(p_stack[stack_i]);
+			else
+				proc_buf[i - 1].first_child_pid =  0;
 		else
 			proc_buf[i - 1].first_child_pid = 0;
-	} while((stack_index >= 0) && (i < upbound));
-	//} while (i < 5);
+	} while ((stack_i >= 0) && (i < upbound));
 	read_unlock(&tasklist_lock);
 
-	if (copy_to_user(buf, proc_buf, i * sizeof(*proc_buf))) {//Needs fixing on i
+	if (copy_to_user(buf, proc_buf, i * sizeof(*proc_buf))) {
 		return_value = -EFAULT;
 		goto free_stack;
 	}
