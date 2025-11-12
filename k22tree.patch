@@ -1,0 +1,303 @@
+diff --git a/arch/x86/entry/syscalls/syscall_64.tbl b/arch/x86/entry/syscalls/syscall_64.tbl
+index 5eb708bff1c7..e656129af79b 100644
+--- a/arch/x86/entry/syscalls/syscall_64.tbl
++++ b/arch/x86/entry/syscalls/syscall_64.tbl
+@@ -390,6 +390,7 @@
+ 464	common	getxattrat		sys_getxattrat
+ 465	common	listxattrat		sys_listxattrat
+ 466	common	removexattrat		sys_removexattrat
++467	common	sys_k22tree		sys_k22tree
+ 
+ #
+ # Due to a historical design error, certain syscalls are numbered differently
+diff --git a/include/uapi/linux/k22info.h b/include/uapi/linux/k22info.h
+new file mode 100644
+index 000000000000..5642e27ecf1c
+--- /dev/null
++++ b/include/uapi/linux/k22info.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++#ifndef _LINUX_K22INFO_H
++#define _LINUX_K22INFO_H
++
++
++#include <linux/types.h>
++
++struct k22info {
++	char comm[64];                  /* name of the executable */
++	pid_t pid;                      /* process ID */
++	pid_t parent_pid;               /* parent process ID */
++	pid_t first_child_pid;          /* PID of youngest child */
++	pid_t next_sibling_pid;         /* PID of next sibling */
++	unsigned long nvcsw;            /* number of voluntary context switches */
++	unsigned long nivcsw;           /* number of involuntary context switches */
++	unsigned long start_time;       /* monotonic start time in nanoseconds */
++};
++#endif
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 87866b037fbe..d6614939119f 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -10,7 +10,7 @@ obj-y     = fork.o exec_domain.o panic.o \
+ 	    extable.o params.o \
+ 	    kthread.o sys_ni.o nsproxy.o \
+ 	    notifier.o ksysfs.o cred.o reboot.o \
+-	    async.o range.o smpboot.o ucount.o regset.o ksyms_common.o
++	    async.o range.o smpboot.o ucount.o regset.o ksyms_common.o k22tree.o
+ 
+ obj-$(CONFIG_USERMODE_DRIVER) += usermode_driver.o
+ obj-$(CONFIG_MULTIUSER) += groups.o
+diff --git a/kernel/k22tree.c b/kernel/k22tree.c
+new file mode 100644
+index 000000000000..defd72e07775
+--- /dev/null
++++ b/kernel/k22tree.c
+@@ -0,0 +1,248 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <linux/k22info.h>
++#include <linux/kernel.h>
++#include <linux/syscalls.h>
++#include <linux/uaccess.h>
++#include <linux/slab.h>
++#include <linux/signal.h>
++#include <linux/spinlock.h>
++#include <linux/spinlock_types.h>
++#include <linux/list.h>
++#include <linux/sched.h>
++#include <linux/sched/task.h>
++#include <linux/pid.h>
++#include <linux/sort.h>
++
++/**
++ * k22tree : Traverses the linux process tree in DFS order and copies their attributes in a buffer
++ *
++ * @buf: The user space buffer that the process details are going to be stored.
++ * @ne: The number of processes the caller wishes to be placed in the buffer.
++ *
++ * The user space buffer needs to be allocated before invoking the syscall.
++ * If less processes than ne are found, ne's value is updated accordingly
++ *
++ * Return value:
++ * On success, this syscall returns the total amount of processes currently running on the system
++ * regardless of the provided ne value.
++ */
++
++// These macros return true if p1 is the sibling of p2, or child respectively
++#define is_sibling(p1, p2) \
++(parent_pid(p1) == parent_pid(p2))
++
++#define is_child(p1, p2) \
++(task_pid_nr(p1) == parent_pid(p2))
++
++// Compare function used to sort the processes in decreasing start_time order.
++static int cmp_children(const void *ch1, const void *ch2)
++{
++	const struct task_struct *task1 = *(const struct task_struct **)ch1;
++	const struct task_struct *task2 = *(const struct task_struct **)ch2;
++
++	if (task1->start_time > task2->start_time)
++		return -1;
++	if (task1->start_time < task2->start_time)
++		return 1;
++	return 0;
++}
++
++// Finds the non-thread parent of a process
++static pid_t parent_pid(struct task_struct *p)
++{
++	if (thread_group_leader(p->real_parent))
++		return task_pid_nr(p->real_parent);
++	return task_pid_nr(p->real_parent->group_leader);
++}
++
++/**
++ * insert_children - Inserts the children of p, into the stack
++ * It adds every child of p into the stack,
++ * taking into account the ones created by tasks in the same thread goup as p
++ * Then, it sorts them in decreasing order, with respect to their start_time
++ */
++static void insert_children(struct task_struct *p, struct task_struct **p_stack, int *stack_i)
++{
++	struct task_struct *curr_task;
++	struct task_struct *curr_child;
++	int stack_inc;
++
++	stack_inc = 0;
++	for_each_thread(p, curr_task) {
++		if (list_empty(&(curr_task->children)))
++			continue;
++		list_for_each_entry(curr_child, &(curr_task->children), sibling)
++			p_stack[*stack_i + (++stack_inc)] = curr_child;
++	}
++
++	if (stack_inc > 1)
++		sort(&p_stack[*stack_i + 1], stack_inc, sizeof(*p_stack), cmp_children, NULL);
++
++	*stack_i += stack_inc;
++}
++
++/**
++ * Inserts rest of the data of a procosses @p into the process buffer @buf at the index @i.
++ * This excludes the first_child_pid and next_sibling_pid entries.
++ */
++static void insert_rest(struct k22info *buf, struct task_struct *p, int i)
++{
++	snprintf(buf[i].comm, sizeof(buf[i].comm), "%s", p->comm);
++	buf[i].pid = task_pid_nr(p);
++	buf[i].parent_pid = parent_pid(p);
++	buf[i].nvcsw = p->nvcsw;
++	buf[i].nivcsw = p->nivcsw;
++	buf[i].start_time = p->start_time;
++}
++
++static int do_k22tree(struct k22info *buf, int *ne)
++{
++	int return_value;
++	int i; // Iterator used in DFS
++	int pnum;
++	int buffer_size;
++	int new_buffer_size; // Used to update buffere size if needed
++	int upbound; // ne
++	int stack_i; // Index of the last element in the stack
++	struct task_struct *p; // Current process
++	struct task_struct **p_stack; // Stack that stores processes
++	struct k22info *proc_buf; // Buffer to write the processes
++
++	// Reading and checking user values
++	if (!buf || !ne) {
++		return_value = -EINVAL;
++		goto out;
++	}
++
++	if (copy_from_user(&upbound, ne, sizeof(int))) {
++		return_value = -EFAULT;
++		goto out;
++	}
++
++	if (upbound <= 0) {
++		return_value = -EINVAL;
++		goto out;
++	}
++
++	/**
++	 * Counting the processes.
++	 * for_each_process does not account for init_task, so pnum is initialized to 1
++	 *
++	 * After that, the required space is allocated.
++	 * If pnum < ne, 10 extra spaces are allocated. This is done to
++	 * significantly reduce the number of times that a reallocation is needed.
++	 */
++	pnum = 1;
++	for_each_process(p)
++		++pnum;
++	buffer_size = (pnum < upbound) ? pnum + 10 : upbound;
++	proc_buf = kmalloc((buffer_size) * sizeof(*proc_buf), GFP_KERNEL);
++	if (!proc_buf) {
++		return_value = -ENOMEM;
++		goto out;
++	}
++	p_stack = kmalloc((buffer_size) * sizeof(struct task_struct *), GFP_KERNEL);
++	if (!p_stack) {
++		return_value = -ENOMEM;
++		goto free_pbuf;
++	}
++
++	read_lock(&tasklist_lock);
++
++	// Before proceeding to the DFS, we need to make sure our buffer can fit all the processes
++	do {
++		// Re-counting the processes, now with a lock set
++		pnum = 1;
++		for_each_process(p)
++			++pnum;
++
++		// Checking whether a reallocation is needed
++		new_buffer_size = (pnum < upbound) ? pnum : upbound;
++		if (new_buffer_size > buffer_size) {
++			// Unlocking before procceding
++			read_unlock(&tasklist_lock);
++			new_buffer_size += 10; // Again, adding a 10 space overhead
++			kfree(proc_buf);
++			kfree(p_stack);
++			proc_buf = kmalloc((buffer_size) * sizeof(*buf), GFP_KERNEL);
++			if (!proc_buf) {
++				return_value = -ENOMEM;
++				goto out;
++			}
++			p_stack = kmalloc((buffer_size) * sizeof(struct task_struct *), GFP_KERNEL);
++			if (!p_stack) {
++				return_value = -ENOMEM;
++				goto free_pbuf;
++			}
++			read_lock(&tasklist_lock);
++		} else {
++			break;
++		}
++	} while (1);
++
++	// Initializing the stack and the indeces needed for the DFS
++	p_stack[0] = &init_task;
++	stack_i = 0;
++	i = 0;
++	// Start of DFS
++	do {
++		p = p_stack[stack_i--]; // Popping stack
++
++		/**
++		 * For this Pre-Order DFS implementation, the process that comes after p,
++		 * will always be the next sibling of it, an unrelated process,
++		 * or p is the only process in the stack.
++		 * This is beacause, the next entry on, is the process that will be traversed,
++		 * after all the children of p have been explored. That will either be the
++		 * next sibling, an irrelevant task or none if p is the last element in the stack.
++		 */
++		if (stack_i >= 0) // Checks whether the stack is empty
++			if (is_sibling(p, p_stack[stack_i]))
++				proc_buf[i].next_sibling_pid = task_pid_nr(p_stack[stack_i]);
++			else
++				proc_buf[i].next_sibling_pid = 0; // p has no next sibling
++		else
++			proc_buf[i].next_sibling_pid = 0;
++
++		insert_rest(proc_buf, p, i++);
++		insert_children(p, p_stack, &stack_i);
++
++		/**
++		 * Very similar to before, the very last child of p that is placed on the stack is
++		 * also going to be the oldest one.
++		 * This makes sense, since it is the very next process that will be popped
++		 * As before, this is true only if p has children.
++		 */
++		if (stack_i >= 0)
++			if (is_child(p, p_stack[stack_i]))
++				proc_buf[i - 1].first_child_pid = task_pid_nr(p_stack[stack_i]);
++			else
++				proc_buf[i - 1].first_child_pid =  0; // p has no next child
++		else
++			proc_buf[i - 1].first_child_pid = 0;
++	} while ((stack_i >= 0) && (i < upbound));
++	read_unlock(&tasklist_lock);
++
++	// Writing the data back
++	if (copy_to_user(buf, proc_buf, i * sizeof(*proc_buf))) {
++		return_value = -EFAULT;
++		goto free_stack;
++	}
++	if (copy_to_user(ne, &i, sizeof(i)))
++		return_value = -EFAULT;
++
++	return_value = pnum;
++
++free_stack:
++	kfree(p_stack);
++free_pbuf:
++	kfree(proc_buf);
++out:
++	return return_value;
++}
++
++// Syscall prototype.
++SYSCALL_DEFINE2(k22tree, struct k22info __user *, buf, int __user *, ne)
++{
++	return do_k22tree(buf, ne);
++}
