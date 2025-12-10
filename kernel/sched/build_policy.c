@@ -49,6 +49,10 @@
 
 #include "idle.c"
 
+#ifdef CONFIG_GRR_SCHED
+# include "grr.c"
+#endif
+
 #include "rt.c"
 
 #ifdef CONFIG_SMP

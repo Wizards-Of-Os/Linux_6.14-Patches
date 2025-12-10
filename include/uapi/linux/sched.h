@@ -120,6 +120,12 @@ struct clone_args {
 #define SCHED_DEADLINE		6
 #define SCHED_EXT		7
 
+#ifdef CONFIG_GRR_SCHED
+
+#define SCHED_GRR		8
+
+#endif
+
 /* Can be ORed in to make sure the process is reverted back to SCHED_NORMAL on fork */
 #define SCHED_RESET_ON_FORK     0x40000000
 

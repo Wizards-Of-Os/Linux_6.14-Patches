@@ -1,4 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0-only
+config GRR_SCHED
+	bool "Group Round-Robin Scheduler Class"
+	help
+	This option enables the Group Round-Robin Scheduling class,
+	and makes it the default scheduler for the system.
+
 config CC_VERSION_TEXT
 	string
 	default "$(CC_VERSION_TEXT)"
