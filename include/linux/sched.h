@@ -597,7 +597,7 @@ struct sched_grr_entity {
 	struct list_head 		run_list;
 	unsigned int			time_slice;
 	unsigned short			on_rq;
-	short int				curr_priority;
+	short int				prio;
 };
 #endif
 

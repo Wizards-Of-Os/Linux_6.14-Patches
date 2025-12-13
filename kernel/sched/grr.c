@@ -1,6 +1,12 @@
 #define GRR_DEFAULT 1
 #define GRR_PERFORMANCE 2
 
+void init_grr_rq(struct grr_rq *grr_rq)
+{
+	INIT_LIST_HEAD(grr_rq->group);
+	INIT_LIST_HEAD(grr_rq->group + 1);
+	grr_rq->grr_nr_running = 0 ; 
+}
 
 void wakeup_preempt_grr(struct rq *rq, struct task_struct *p, int flags)
 {
@@ -12,10 +18,7 @@ void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 	
 }
 
-void init_rt_rq()
-{
-	
-}
+
 
 DEFINE_SCHED_CLASS(grr) = {
 

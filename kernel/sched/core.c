@@ -4509,6 +4509,13 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->rt.on_rq		= 0;
 	p->rt.on_list		= 0;
 
+#ifdef CONFIG_GRR_SCHED
+	INIT_LIST_HEAD(&p->grr.run_list);
+	p->grr.time_slice = sched_rr_timeslice;
+	p->grr.on_rq = 0 ; 
+	p->grr.prio = 0;
+#endif
+
 #ifdef CONFIG_SCHED_CLASS_EXT
 	init_scx_entity(&p->scx);
 #endif
@@ -4751,13 +4758,19 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 		 * fulfilled its duty:
 		 */
 		p->sched_reset_on_fork = 0;
-	}
+	}	
 
 	if (dl_prio(p->prio))
 		return -EAGAIN;
 
 	scx_pre_fork(p);
 
+	#ifdef CONFIG_GRR_SCHED
+		if(p->policy == SCHED_GRR){
+			p->sched_class = &grr_sched_class;
+		}
+		else
+	#endif
 	if (rt_prio(p->prio)) {
 		p->sched_class = &rt_sched_class;
 #ifdef CONFIG_SCHED_CLASS_EXT
@@ -8485,7 +8498,12 @@ void __init sched_init(void)
 	BUG_ON(!sched_class_above(&stop_sched_class, &dl_sched_class));
 #endif
 	BUG_ON(!sched_class_above(&dl_sched_class, &rt_sched_class));
+#ifndef CONFIG_GRR_SCHED
 	BUG_ON(!sched_class_above(&rt_sched_class, &fair_sched_class));
+#else
+	BUG_ON(!sched_class_above(&rt_sched_class, &grr_sched_class));
+	BUG_ON(!sched_class_above(&grr_sched_class, &fair_sched_class));	
+#endif
 	BUG_ON(!sched_class_above(&fair_sched_class, &idle_sched_class));
 #ifdef CONFIG_SCHED_CLASS_EXT
 	BUG_ON(!sched_class_above(&fair_sched_class, &ext_sched_class));
@@ -8555,6 +8573,9 @@ void __init sched_init(void)
 		init_cfs_rq(&rq->cfs);
 		init_rt_rq(&rq->rt);
 		init_dl_rq(&rq->dl);
+		#ifdef CONFIG_GRR_SCHED
+			init_grr_rq(&rq->grr);
+		#endif
 #ifdef CONFIG_FAIR_GROUP_SCHED
 		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
 		rq->tmp_alone_branch = &rq->leaf_cfs_rq_list;
