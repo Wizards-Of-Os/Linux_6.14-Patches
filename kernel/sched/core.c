@@ -4511,7 +4511,7 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 
 #ifdef CONFIG_GRR_SCHED
 	INIT_LIST_HEAD(&p->grr.run_list);
-	p->grr.time_slice = sched_rr_timeslice;
+	p->grr.time_slice = RR_TIMESLICE;
 	p->grr.on_rq = 0 ; 
 	p->grr.prio = 0;
 #endif

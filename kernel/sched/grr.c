@@ -1,24 +1,125 @@
 #define GRR_DEFAULT 1
 #define GRR_PERFORMANCE 2
 
-void init_grr_rq(struct grr_rq *grr_rq)
+static void init_grr_rq(struct grr_rq *grr_rq)
 {
 	INIT_LIST_HEAD(grr_rq->group);
 	INIT_LIST_HEAD(grr_rq->group + 1);
 	grr_rq->grr_nr_running = 0 ; 
 }
 
-void wakeup_preempt_grr(struct rq *rq, struct task_struct *p, int flags)
+static inline struct task_struct *grr_task_of(struct sched_grr_entity *grr_se)
+{
+	return container_of(grr_se, struct task_struct, grr);
+}
+
+static void requeue_task_rt(struct rq *rq, struct task_struct *p)
+{	
+	struct sched_grr_entity *grr_se = &p->grr;
+	struct grr_rq * grr_rq = &rq->grr_rq;
+	int idx = grr_se->prio ;
+
+	list_move_tail(&grr_se->run_list, grr_rq->group + idx);
+}
+
+static void wakeup_preempt_grr(struct rq *rq, struct task_struct *p, int flags)
 {
 
 }
 
-void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
+static void enqueue_task_grr(struct rq *rq, struct task_struct *p, int flags)
 {
+	struct sched_grr_entity *grr_se = &p->grr;
+	struct grr_rq * grr_rq = &rq->grr_rq;
+	int idx = grr_se->prio ;
+
+	if (idx >1 || idx < 0) {
+		return ; 
+	}
+	
+	list_add_tail(&grr_se->run_list , grr_rq->group + idx );
+	grr_rq->grr_nr_running++;
+}
+
+static void dequeue_task_grr(struct rq *rq, struct task_struct *p, int flags)
+{	
+	if (!list_empty(&p->grr.run_list)) { 
+		list_del(&p->grr.run_list);
+		grr_rq->grr_nr_running--;
+	}
+
+}
+
+static void yield_task_grr(struct rq *rq)
+{
+	struct sched_grr_entity *grr_se = &rq->curr.grr;
+	list_move_tail(&grr_se->run_list, grr_se->group + grr_se->prio);
+}
+
+static struct task_struct *pick_task_grr(struct rq *rq)
+{
+	struct grr_rq *grr_rq = &rq->grr;
+	struct sched_grr_entity *grr_se; 
+
+	if(!list_empty(grr_rq->group)) {
+		grr_se = list_first_entry( grr_rq->group , struct sched_grr_entity , run_list);
+		return grr_task_of(grr_se);
+	}
+	
+	if(!list_empty(grr_rq->group + 1)) {
+		grr_se = list_first_entry( grr_rq->group + 1 , struct sched_grr_entity , run_list);
+		return grr_task_of(grr_se);
+	}
+
+	return NULL;
+}
+
+static void put_prev_task_grr(struct rq *rq, struct task_struct *p, struct task_struct *next)
+{
+	//!
+}
+
+static inline void set_next_task_grr(struct rq *rq, struct task_struct *p, bool first)
+{
+	//!
+}
+
+static void task_tick_rt(struct rq *rq, struct task_struct *p, int queued)
+{
+	struct sched_grr_entity *grr_se = &p->grr;
+
+	if (--p->grr.time_slice)
+		return;
+
+	p->grr.time_slice = RR_TIMESLICE
+	
+	if (grr_se->run_list.prev != grr_se->run_list.next) {
+		requeue_task_grr(rq, p);
+		resched_curr(rq);
+		return;
+	}
 	
 }
 
+static unsigned int get_rr_interval_grr(struct rq *rq, struct task_struct *task)
+{
+	return RR_TIMESLICE;
+}
 
+static void prio_changed_grr(struct rq *rq, struct task_struct *p, int oldprio)
+{
+	//Μπορει να χρειαστει να ελεγξουμε εαν το priority γινει πολυ μικρο και χρειαστει να αλλαξη η κλαση -> call reschedule
+}
+
+static void switched_to_grr(struct rq *rq, struct task_struct *p)
+{
+
+}
+
+static void update_curr_grr(struct rq *rq)
+{
+
+}
 
 DEFINE_SCHED_CLASS(grr) = {
 
