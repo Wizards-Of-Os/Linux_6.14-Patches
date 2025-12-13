@@ -590,6 +590,17 @@ struct sched_entity {
 #endif
 };
 
+//PUCINI 3
+
+#ifdef CONFIG_GRR_SCHED
+struct sched_grr_entity {
+	struct list_head 		run_list;
+	unsigned int			time_slice;
+	unsigned short			on_rq;
+	short int				curr_priority;
+};
+#endif
+
 struct sched_rt_entity {
 	struct list_head		run_list;
 	unsigned long			timeout;
@@ -840,7 +851,9 @@ struct task_struct {
 	int				static_prio;
 	int				normal_prio;
 	unsigned int			rt_priority;
-
+	#ifdef CONFIG_GRR_SCHED
+	struct sched_grr_entity grr;
+	#endif
 	struct sched_entity		se;
 	struct sched_rt_entity		rt;
 	struct sched_dl_entity		dl;

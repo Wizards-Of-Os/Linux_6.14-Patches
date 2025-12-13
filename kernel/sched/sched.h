@@ -202,6 +202,15 @@ static inline int normal_policy(int policy)
 	return policy == SCHED_NORMAL;
 }
 
+
+//PUCCINI
+#ifdef CONFIG_GRR_SCHED
+static inline int grr_policy(int policy)
+{
+	return policy == SCHED_GRR;
+}
+#endif
+
 static inline int fair_policy(int policy)
 {
 	return normal_policy(policy) || policy == SCHED_BATCH;
@@ -217,8 +226,15 @@ static inline int dl_policy(int policy)
 	return policy == SCHED_DEADLINE;
 }
 
+//PUCCINI 2
 static inline bool valid_policy(int policy)
 {
+	#ifdef CONFIG_GRR_SCHED
+
+	return idle_policy(policy) || fair_policy(policy) ||
+		rt_policy(policy) || dl_policy(policy) || grr_policy(policy);
+	#endif
+
 	return idle_policy(policy) || fair_policy(policy) ||
 		rt_policy(policy) || dl_policy(policy);
 }
@@ -797,6 +813,17 @@ static inline int rt_bandwidth_enabled(void)
 # define HAVE_RT_PUSH_IPI
 #endif
 
+//PUCCINI 4
+
+#ifdef CONFIG_GRR_SCHED
+struct grr_rq {
+	struct list_head group[2];
+	unsigned int		grr_nr_running;
+};
+#endif
+
+
+
 /* Real-Time classes' related field in a runqueue: */
 struct rt_rq {
 	struct rt_prio_array	active;
@@ -1132,6 +1159,9 @@ struct rq {
 #define UCLAMP_FLAG_IDLE 0x01
 #endif
 
+	#ifdef CONFIG_GRR_SCHED
+	struct grr_rq		grr;
+	#endif
 	struct cfs_rq		cfs;
 	struct rt_rq		rt;
 	struct dl_rq		dl;

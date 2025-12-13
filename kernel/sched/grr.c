@@ -1,3 +1,22 @@
+#define GRR_DEFAULT 1
+#define GRR_PERFORMANCE 2
+
+
+void wakeup_preempt_grr(struct rq *rq, struct task_struct *p, int flags)
+{
+
+}
+
+void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
+{
+	
+}
+
+void init_rt_rq()
+{
+	
+}
+
 DEFINE_SCHED_CLASS(grr) = {
 
 	.enqueue_task		= enqueue_task_grr,
@@ -29,12 +48,4 @@ DEFINE_SCHED_CLASS(grr) = {
 	.switched_to		= switched_to_grr,
 
 	.update_curr		= update_curr_grr,
-
-#ifdef CONFIG_SCHED_CORE
-	.task_is_throttled	= task_is_throttled_grr,
-#endif
-
-#ifdef CONFIG_UCLAMP_TASK
-	.uclamp_enabled		= 1,
-#endif
 };
