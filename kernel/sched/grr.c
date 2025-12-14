@@ -1,7 +1,7 @@
 #define GRR_DEFAULT 1
 #define GRR_PERFORMANCE 2
 
-static void init_grr_rq(struct grr_rq *grr_rq)
+void init_grr_rq(struct grr_rq *grr_rq)
 {
 	INIT_LIST_HEAD(grr_rq->group);
 	INIT_LIST_HEAD(grr_rq->group + 1);
@@ -13,10 +13,10 @@ static inline struct task_struct *grr_task_of(struct sched_grr_entity *grr_se)
 	return container_of(grr_se, struct task_struct, grr);
 }
 
-static void requeue_task_rt(struct rq *rq, struct task_struct *p)
+static void requeue_task_grr(struct rq *rq, struct task_struct *p)
 {	
 	struct sched_grr_entity *grr_se = &p->grr;
-	struct grr_rq * grr_rq = &rq->grr_rq;
+	struct grr_rq * grr_rq = &rq->grr;
 	int idx = grr_se->prio ;
 
 	list_move_tail(&grr_se->run_list, grr_rq->group + idx);
@@ -30,7 +30,7 @@ static void wakeup_preempt_grr(struct rq *rq, struct task_struct *p, int flags)
 static void enqueue_task_grr(struct rq *rq, struct task_struct *p, int flags)
 {
 	struct sched_grr_entity *grr_se = &p->grr;
-	struct grr_rq * grr_rq = &rq->grr_rq;
+	struct grr_rq * grr_rq = &rq->grr;
 	int idx = grr_se->prio ;
 
 	if (idx >1 || idx < 0) {
@@ -41,19 +41,23 @@ static void enqueue_task_grr(struct rq *rq, struct task_struct *p, int flags)
 	grr_rq->grr_nr_running++;
 }
 
-static void dequeue_task_grr(struct rq *rq, struct task_struct *p, int flags)
+static bool dequeue_task_grr(struct rq *rq, struct task_struct *p, int flags)
 {	
+	struct grr_rq * grr_rq = &rq->grr;
+
 	if (!list_empty(&p->grr.run_list)) { 
 		list_del(&p->grr.run_list);
 		grr_rq->grr_nr_running--;
+		return true;
 	}
-
+	return false;
 }
 
 static void yield_task_grr(struct rq *rq)
 {
-	struct sched_grr_entity *grr_se = &rq->curr.grr;
-	list_move_tail(&grr_se->run_list, grr_se->group + grr_se->prio);
+	struct sched_grr_entity *grr_se = &rq->curr->grr;
+	struct grr_rq * grr_rq = &rq->grr;
+	list_move_tail(&grr_se->run_list, grr_rq->group + grr_se->prio);
 }
 
 static struct task_struct *pick_task_grr(struct rq *rq)
@@ -84,14 +88,14 @@ static inline void set_next_task_grr(struct rq *rq, struct task_struct *p, bool 
 	//!
 }
 
-static void task_tick_rt(struct rq *rq, struct task_struct *p, int queued)
+static void task_tick_grr(struct rq *rq, struct task_struct *p, int queued)
 {
 	struct sched_grr_entity *grr_se = &p->grr;
 
 	if (--p->grr.time_slice)
 		return;
 
-	p->grr.time_slice = RR_TIMESLICE
+	p->grr.time_slice = RR_TIMESLICE;
 	
 	if (grr_se->run_list.prev != grr_se->run_list.next) {
 		requeue_task_grr(rq, p);
