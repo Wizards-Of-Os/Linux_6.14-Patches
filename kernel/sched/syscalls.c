@@ -1489,14 +1489,17 @@ SYSCALL_DEFINE1(sched_get_priority_max, int, policy)
 	switch (policy) {
 	case SCHED_FIFO:
 	case SCHED_RR:
-		ret = MAX_RT_PRIO-1;
-		break;
+	ret = MAX_RT_PRIO-1;
+	break;
 	case SCHED_DEADLINE:
+#ifdef CONFIG_GRR_SCHED
+	case SCHED_GRR:
+#endif
 	case SCHED_NORMAL:
 	case SCHED_BATCH:
 	case SCHED_IDLE:
 	case SCHED_EXT:
-		ret = 0;
+	ret = 0;
 		break;
 	}
 	return ret;
@@ -1520,6 +1523,9 @@ SYSCALL_DEFINE1(sched_get_priority_min, int, policy)
 		ret = 1;
 		break;
 	case SCHED_DEADLINE:
+#ifdef CONFIG_GRR_SCHED
+	case SCHED_GRR:
+#endif
 	case SCHED_NORMAL:
 	case SCHED_BATCH:
 	case SCHED_IDLE:

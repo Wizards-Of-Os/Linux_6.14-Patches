@@ -75,7 +75,11 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 	.prio		= MAX_PRIO - 20,
 	.static_prio	= MAX_PRIO - 20,
 	.normal_prio	= MAX_PRIO - 20,
+#ifdef CONFIG_GRR_SCHED
+	.policy		= SCHED_GRR,
+#else
 	.policy		= SCHED_NORMAL,
+#endif
 	.cpus_ptr	= &init_task.cpus_mask,
 	.user_cpus_ptr	= NULL,
 	.cpus_mask	= CPU_MASK_ALL,
@@ -87,6 +91,13 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 	.restart_block	= {
 		.fn = do_no_restart_syscall,
 	},
+#ifdef CONFIF_GRR_SCHED
+	.grr = {
+		.run_list = LIST_HEAD_INIT(init_task.grr.run_list),
+		.time_slice = RR_TIMESLICE,
+		.prio = 0,
+	},
+#endif
 	.se		= {
 		.group_node 	= LIST_HEAD_INIT(init_task.se.group_node),
 	},
