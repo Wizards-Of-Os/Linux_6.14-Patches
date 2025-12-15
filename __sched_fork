@@ -1,0 +1,589 @@
+[1mdiff --git a/include/asm-generic/vmlinux.lds.h b/include/asm-generic/vmlinux.lds.h[m
+[1mindex 0d5b186abee8..738b5a3481ed 100644[m
+[1m--- a/include/asm-generic/vmlinux.lds.h[m
+[1m+++ b/include/asm-generic/vmlinux.lds.h[m
+[36m@@ -133,17 +133,34 @@[m [mdefined(CONFIG_AUTOFDO_CLANG) || defined(CONFIG_PROPELLER_CLANG)[m
+  * used to determine the order of the priority of each sched class in[m
+  * relation to each other.[m
+  */[m
+[32m+[m
+[32m+[m[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m[41m	[m
+ #define SCHED_DATA				\[m
+ 	STRUCT_ALIGN();				\[m
+ 	__sched_class_highest = .;		\[m
+ 	*(__stop_sched_class)			\[m
+ 	*(__dl_sched_class)			\[m
+ 	*(__rt_sched_class)			\[m
+[32m+[m	[32m*(__grr_sched_class)			\[m
+ 	*(__fair_sched_class)			\[m
+ 	*(__ext_sched_class)			\[m
+ 	*(__idle_sched_class)			\[m
+ 	__sched_class_lowest = .;[m
+ [m
+[32m+[m[32m#else[m
+[32m+[m	[32m#define SCHED_DATA				\[m
+[32m+[m		[32mSTRUCT_ALIGN();				\[m
+[32m+[m		[32m__sched_class_highest = .;		\[m
+[32m+[m		[32m*(__stop_sched_class)			\[m
+[32m+[m		[32m*(__dl_sched_class)			\[m
+[32m+[m		[32m*(__rt_sched_class)			\[m
+[32m+[m		[32m*(__fair_sched_class)			\[m
+[32m+[m		[32m*(__ext_sched_class)			\[m
+[32m+[m		[32m*(__idle_sched_class)			\[m
+[32m+[m		[32m__sched_class_lowest = .;[m
+[32m+[m[32m#endif[m
+[32m+[m
+ /* The actual configuration determine if the init/exit sections[m
+  * are handled as text/data or they can be discarded (which[m
+  * often happens at runtime)[m
+[1mdiff --git a/include/linux/sched.h b/include/linux/sched.h[m
+[1mindex 9c15365a30c0..8af367ca12c1 100644[m
+[1m--- a/include/linux/sched.h[m
+[1m+++ b/include/linux/sched.h[m
+[36m@@ -590,6 +590,17 @@[m [mstruct sched_entity {[m
+ #endif[m
+ };[m
+ [m
+[32m+[m[32m//PUCINI 3[m
+[32m+[m
+[32m+[m[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m[32mstruct sched_grr_entity {[m
+[32m+[m	[32mstruct list_head 		run_list;[m
+[32m+[m	[32munsigned int			time_slice;[m
+[32m+[m	[32munsigned short			on_rq;[m
+[32m+[m	[32mshort int				prio;[m
+[32m+[m[32m};[m
+[32m+[m[32m#endif[m
+[32m+[m
+ struct sched_rt_entity {[m
+ 	struct list_head		run_list;[m
+ 	unsigned long			timeout;[m
+[36m@@ -840,7 +851,9 @@[m [mstruct task_struct {[m
+ 	int				static_prio;[m
+ 	int				normal_prio;[m
+ 	unsigned int			rt_priority;[m
+[31m-[m
+[32m+[m	[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m	[32mstruct sched_grr_entity grr;[m
+[32m+[m	[32m#endif[m
+ 	struct sched_entity		se;[m
+ 	struct sched_rt_entity		rt;[m
+ 	struct sched_dl_entity		dl;[m
+[1mdiff --git a/include/uapi/linux/sched.h b/include/uapi/linux/sched.h[m
+[1mindex 359a14cc76a4..4b730bf9a54b 100644[m
+[1m--- a/include/uapi/linux/sched.h[m
+[1m+++ b/include/uapi/linux/sched.h[m
+[36m@@ -120,6 +120,10 @@[m [mstruct clone_args {[m
+ #define SCHED_DEADLINE		6[m
+ #define SCHED_EXT		7[m
+ [m
+[32m+[m
+[32m+[m[32m#define SCHED_GRR		8[m
+[32m+[m
+[32m+[m
+ /* Can be ORed in to make sure the process is reverted back to SCHED_NORMAL on fork */[m
+ #define SCHED_RESET_ON_FORK     0x40000000[m
+ [m
+[1mdiff --git a/init/Kconfig b/init/Kconfig[m
+[1mindex 324c2886b2ea..ffa4ef7c5771 100644[m
+[1m--- a/init/Kconfig[m
+[1m+++ b/init/Kconfig[m
+[36m@@ -1,4 +1,10 @@[m
+ # SPDX-License-Identifier: GPL-2.0-only[m
+[32m+[m[32mconfig GRR_SCHED[m
+[32m+[m	[32mbool "Group Round-Robin Scheduler Class"[m
+[32m+[m	[32mhelp[m
+[32m+[m	[32mThis option enables the Group Round-Robin Scheduling class,[m
+[32m+[m	[32mand makes it the default scheduler for the system.[m
+[32m+[m
+ config CC_VERSION_TEXT[m
+ 	string[m
+ 	default "$(CC_VERSION_TEXT)"[m
+[1mdiff --git a/init/init_task.c b/init/init_task.c[m
+[1mindex e557f622bd90..c007bcb5887a 100644[m
+[1m--- a/init/init_task.c[m
+[1m+++ b/init/init_task.c[m
+[36m@@ -75,7 +75,11 @@[m [mstruct task_struct init_task __aligned(L1_CACHE_BYTES) = {[m
+ 	.prio		= MAX_PRIO - 20,[m
+ 	.static_prio	= MAX_PRIO - 20,[m
+ 	.normal_prio	= MAX_PRIO - 20,[m
+[32m+[m[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m	[32m.policy		= SCHED_GRR,[m
+[32m+[m[32m#else[m
+ 	.policy		= SCHED_NORMAL,[m
+[32m+[m[32m#endif[m
+ 	.cpus_ptr	= &init_task.cpus_mask,[m
+ 	.user_cpus_ptr	= NULL,[m
+ 	.cpus_mask	= CPU_MASK_ALL,[m
+[36m@@ -87,6 +91,13 @@[m [mstruct task_struct init_task __aligned(L1_CACHE_BYTES) = {[m
+ 	.restart_block	= {[m
+ 		.fn = do_no_restart_syscall,[m
+ 	},[m
+[32m+[m[32m#ifdef CONFIF_GRR_SCHED[m
+[32m+[m	[32m.grr = {[m
+[32m+[m		[32m.run_list = LIST_HEAD_INIT(init_task.grr.run_list),[m
+[32m+[m		[32m.time_slice = RR_TIMESLICE,[m
+[32m+[m		[32m.prio = 0,[m
+[32m+[m	[32m},[m
+[32m+[m[32m#endif[m
+ 	.se		= {[m
+ 		.group_node 	= LIST_HEAD_INIT(init_task.se.group_node),[m
+ 	},[m
+[1mdiff --git a/kernel/kthread.c b/kernel/kthread.c[m
+[1mindex 5dc5b0d7238e..34de5520d11e 100644[m
+[1m--- a/kernel/kthread.c[m
+[1m+++ b/kernel/kthread.c[m
+[36m@@ -438,7 +438,11 @@[m [mstatic int kthread(void *_create)[m
+ 	 * The new thread inherited kthreadd's priority and CPU mask. Reset[m
+ 	 * back to default in case they have been changed.[m
+ 	 */[m
+[32m+[m[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m	[32msched_setscheduler_nocheck(current, SCHED_GRR, &param);[m
+[32m+[m[32m#else[m
+ 	sched_setscheduler_nocheck(current, SCHED_NORMAL, &param);[m
+[32m+[m[32m#endif[m
+ [m
+ 	/* OK, tell user we're spawned, wait for stop or wakeup */[m
+ 	__set_current_state(TASK_UNINTERRUPTIBLE);[m
+[1mdiff --git a/kernel/sched/build_policy.c b/kernel/sched/build_policy.c[m
+[1mindex fae1f5c921eb..06810d74a577 100644[m
+[1m--- a/kernel/sched/build_policy.c[m
+[1m+++ b/kernel/sched/build_policy.c[m
+[36m@@ -49,6 +49,10 @@[m
+ [m
+ #include "idle.c"[m
+ [m
+[32m+[m[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m[32m# include "grr.c"[m
+[32m+[m[32m#endif[m
+[32m+[m
+ #include "rt.c"[m
+ [m
+ #ifdef CONFIG_SMP[m
+[1mdiff --git a/kernel/sched/core.c b/kernel/sched/core.c[m
+[1mindex 042351c7afce..0e7d70c56080 100644[m
+[1m--- a/kernel/sched/core.c[m
+[1m+++ b/kernel/sched/core.c[m
+[36m@@ -4509,6 +4509,13 @@[m [mstatic void __sched_fork(unsigned long clone_flags, struct task_struct *p)[m
+ 	p->rt.on_rq		= 0;[m
+ 	p->rt.on_list		= 0;[m
+ [m
+[32m+[m[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m	[32mINIT_LIST_HEAD(&p->grr.run_list);[m
+[32m+[m	[32mp->grr.time_slice = RR_TIMESLICE;[m
+[32m+[m	[32mp->grr.on_rq = 0 ;[m[41m [m
+[32m+[m	[32mp->grr.prio = current->grr.prio;[m
+[32m+[m[32m#endif[m
+[32m+[m
+ #ifdef CONFIG_SCHED_CLASS_EXT[m
+ 	init_scx_entity(&p->scx);[m
+ #endif[m
+[36m@@ -4734,11 +4741,21 @@[m [mint sched_fork(unsigned long clone_flags, struct task_struct *p)[m
+ 	 * Revert to default priority/policy on fork if requested.[m
+ 	 */[m
+ 	if (unlikely(p->sched_reset_on_fork)) {[m
+[32m+[m	[32m#ifdef CONFIF_GRR_SCHED[m
+[32m+[m		[32mp->grr.prio = 0;[m
+[32m+[m		[32mif (task_has_dl_policy(p) || task_has_rt_policy(p) || fair_policy(p->policy)) {[m
+[32m+[m			[32mp->policy = SCHED_GRR;[m
+[32m+[m			[32mp->static_prio = NICE_TO_PRIO(0);[m
+[32m+[m			[32mp->rt_priority = 0;[m
+[32m+[m		[32m}[m
+[32m+[m	[32m#else[m
+ 		if (task_has_dl_policy(p) || task_has_rt_policy(p)) {[m
+ 			p->policy = SCHED_NORMAL;[m
+ 			p->static_prio = NICE_TO_PRIO(0);[m
+ 			p->rt_priority = 0;[m
+[31m-		} else if (PRIO_TO_NICE(p->static_prio) < 0)[m
+[32m+[m		[32m}[m
+[32m+[m	[32m#endif[m
+[32m+[m		[32melse if (PRIO_TO_NICE(p->static_prio) < 0)[m
+ 			p->static_prio = NICE_TO_PRIO(0);[m
+ [m
+ 		p->prio = p->normal_prio = p->static_prio;[m
+[36m@@ -4751,13 +4768,19 @@[m [mint sched_fork(unsigned long clone_flags, struct task_struct *p)[m
+ 		 * fulfilled its duty:[m
+ 		 */[m
+ 		p->sched_reset_on_fork = 0;[m
+[31m-	}[m
+[32m+[m	[32m}[m[41m	[m
+ [m
+ 	if (dl_prio(p->prio))[m
+ 		return -EAGAIN;[m
+ [m
+ 	scx_pre_fork(p);[m
+ [m
+[32m+[m	[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m		[32mif(p->policy == SCHED_GRR){[m
+[32m+[m			[32mp->sched_class = &grr_sched_class;[m
+[32m+[m		[32m}[m
+[32m+[m		[32melse[m
+[32m+[m	[32m#endif[m
+ 	if (rt_prio(p->prio)) {[m
+ 		p->sched_class = &rt_sched_class;[m
+ #ifdef CONFIG_SCHED_CLASS_EXT[m
+[36m@@ -6026,6 +6049,7 @@[m [m__pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)[m
+ 	 * higher scheduling class, because otherwise those lose the[m
+ 	 * opportunity to pull in more work from other CPUs.[m
+ 	 */[m
+[32m+[m	[32m#ifndef CONFIG_GRR_SCHED[m
+ 	if (likely(!sched_class_above(prev->sched_class, &fair_sched_class) &&[m
+ 		   rq->nr_running == rq->cfs.h_nr_queued)) {[m
+ [m
+[36m@@ -6041,6 +6065,7 @@[m [m__pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)[m
+ [m
+ 		return p;[m
+ 	}[m
+[32m+[m	[32m#endif[m
+ [m
+ restart:[m
+ 	prev_balance(rq, prev, rf);[m
+[36m@@ -7102,6 +7127,10 @@[m [mEXPORT_SYMBOL(default_wake_function);[m
+ [m
+ const struct sched_class *__setscheduler_class(int policy, int prio)[m
+ {[m
+[32m+[m[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m	[32mif(policy == SCHED_GRR)[m
+[32m+[m		[32mreturn &grr_sched_class;[m
+[32m+[m[32m#endif[m
+ 	if (dl_prio(prio))[m
+ 		return &dl_sched_class;[m
+ [m
+[36m@@ -8483,7 +8512,12 @@[m [mvoid __init sched_init(void)[m
+ 	BUG_ON(!sched_class_above(&stop_sched_class, &dl_sched_class));[m
+ #endif[m
+ 	BUG_ON(!sched_class_above(&dl_sched_class, &rt_sched_class));[m
+[32m+[m[32m#ifndef CONFIG_GRR_SCHED[m
+ 	BUG_ON(!sched_class_above(&rt_sched_class, &fair_sched_class));[m
+[32m+[m[32m#else[m
+[32m+[m	[32mBUG_ON(!sched_class_above(&rt_sched_class, &grr_sched_class));[m
+[32m+[m	[32mBUG_ON(!sched_class_above(&grr_sched_class, &fair_sched_class));[m[41m	[m
+[32m+[m[32m#endif[m
+ 	BUG_ON(!sched_class_above(&fair_sched_class, &idle_sched_class));[m
+ #ifdef CONFIG_SCHED_CLASS_EXT[m
+ 	BUG_ON(!sched_class_above(&fair_sched_class, &ext_sched_class));[m
+[36m@@ -8553,6 +8587,9 @@[m [mvoid __init sched_init(void)[m
+ 		init_cfs_rq(&rq->cfs);[m
+ 		init_rt_rq(&rq->rt);[m
+ 		init_dl_rq(&rq->dl);[m
+[32m+[m		[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m			[32minit_grr_rq(&rq->grr);[m
+[32m+[m		[32m#endif[m
+ #ifdef CONFIG_FAIR_GROUP_SCHED[m
+ 		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);[m
+ 		rq->tmp_alone_branch = &rq->leaf_cfs_rq_list;[m
+[36m@@ -8836,7 +8873,11 @@[m [mvoid normalize_rt_tasks(void)[m
+ {[m
+ 	struct task_struct *g, *p;[m
+ 	struct sched_attr attr = {[m
+[32m+[m	[32m#ifdef CONFIF_GRR_SCHED[m
+[32m+[m		[32m.sched_policy = SCHED_GRR,[m
+[32m+[m	[32m#else[m
+ 		.sched_policy = SCHED_NORMAL,[m
+[32m+[m	[32m#endif[m
+ 	};[m
+ [m
+ 	read_lock(&tasklist_lock);[m
+[1mdiff --git a/kernel/sched/ext.c b/kernel/sched/ext.c[m
+[1mindex 7b9dfee858e7..a65a344d0bf7 100644[m
+[1m--- a/kernel/sched/ext.c[m
+[1m+++ b/kernel/sched/ext.c[m
+[36m@@ -4003,7 +4003,11 @@[m [mstatic int scx_ops_init_task(struct task_struct *p, struct task_group *tg, bool[m
+ 			 * @p can never be in SCX.[m
+ 			 */[m
+ 			if (p->policy == SCHED_EXT) {[m
+[32m+[m			[32m#ifdef CONFIF_GRR_SCHED[m
+[32m+[m				[32mp->policy = SCHED_GRR;[m
+[32m+[m			[32m#else[m
+ 				p->policy = SCHED_NORMAL;[m
+[32m+[m			[32m#endif[m
+ 				atomic_long_inc(&scx_nr_rejected);[m
+ 			}[m
+ [m
+[1mdiff --git a/kernel/sched/grr.c b/kernel/sched/grr.c[m
+[1mnew file mode 100644[m
+[1mindex 000000000000..5b52d87d3699[m
+[1m--- /dev/null[m
+[1m+++ b/kernel/sched/grr.c[m
+[36m@@ -0,0 +1,159 @@[m
+[32m+[m[32m#define GRR_DEFAULT 1[m
+[32m+[m[32m#define GRR_PERFORMANCE 2[m
+[32m+[m
+[32m+[m[32mvoid init_grr_rq(struct grr_rq *grr_rq)[m
+[32m+[m[32m{[m
+[32m+[m	[32mINIT_LIST_HEAD(grr_rq->group);[m
+[32m+[m	[32mINIT_LIST_HEAD(grr_rq->group + 1);[m
+[32m+[m	[32mgrr_rq->grr_nr_running = 0 ;[m[41m [m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mstatic inline struct task_struct *grr_task_of(struct sched_grr_entity *grr_se)[m
+[32m+[m[32m{[m
+[32m+[m	[32mreturn container_of(grr_se, struct task_struct, grr);[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mstatic void requeue_task_grr(struct rq *rq, struct task_struct *p)[m
+[32m+[m[32m{[m[41m	[m
+[32m+[m	[32mstruct sched_grr_entity *grr_se = &p->grr;[m
+[32m+[m	[32mstruct grr_rq * grr_rq = &rq->grr;[m
+[32m+[m	[32mint idx = grr_se->prio ;[m
+[32m+[m
+[32m+[m	[32mlist_move_tail(&grr_se->run_list, grr_rq->group + idx);[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mstatic void wakeup_preempt_grr(struct rq *rq, struct task_struct *p, int flags)[m
+[32m+[m[32m{[m
+[32m+[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mstatic void enqueue_task_grr(struct rq *rq, struct task_struct *p, int flags)[m
+[32m+[m[32m{[m
+[32m+[m	[32mstruct sched_grr_entity *grr_se = &p->grr;[m
+[32m+[m	[32mstruct grr_rq * grr_rq = &rq->grr;[m
+[32m+[m	[32mint idx = grr_se->prio ;[m
+[32m+[m
+[32m+[m	[32mif (idx >1 || idx < 0) {[m
+[32m+[m		[32mreturn ;[m[41m [m
+[32m+[m	[32m}[m
+[32m+[m[41m	[m
+[32m+[m	[32mlist_add_tail(&grr_se->run_list , grr_rq->group + idx );[m
+[32m+[m	[32mgrr_rq->grr_nr_running++;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mstatic bool dequeue_task_grr(struct rq *rq, struct task_struct *p, int flags)[m
+[32m+[m[32m{[m[41m	[m
+[32m+[m	[32mstruct grr_rq * grr_rq = &rq->grr;[m
+[32m+[m
+[32m+[m	[32mif (!list_empty(&p->grr.run_list)) {[m[41m [m
+[32m+[m		[32mlist_del(&p->grr.run_list);[m
+[32m+[m		[32mgrr_rq->grr_nr_running--;[m
+[32m+[m		[32mreturn true;[m
+[32m+[m	[32m}[m
+[32m+[m	[32mreturn false;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mstatic void yield_task_grr(struct rq *rq)[m
+[32m+[m[32m{[m
+[32m+[m	[32mstruct sched_grr_entity *grr_se = &rq->curr->grr;[m
+[32m+[m	[32mstruct grr_rq * grr_rq = &rq->grr;[m
+[32m+[m	[32mlist_move_tail(&grr_se->run_list, grr_rq->group + grr_se->prio);[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mstatic struct task_struct *pick_task_grr(struct rq *rq)[m
+[32m+[m[32m{[m
+[32m+[m	[32mstruct grr_rq *grr_rq = &rq->grr;[m
+[32m+[m	[32mstruct sched_grr_entity *grr_se;[m[41m [m
+[32m+[m
+[32m+[m	[32mif(!list_empty(grr_rq->group)) {[m
+[32m+[m		[32mgrr_se = list_first_entry( grr_rq->group , struct sched_grr_entity , run_list);[m
+[32m+[m		[32mreturn grr_task_of(grr_se);[m
+[32m+[m	[32m}[m
+[32m+[m[41m	[m
+[32m+[m	[32mif(!list_empty(grr_rq->group + 1)) {[m
+[32m+[m		[32mgrr_se = list_first_entry( grr_rq->group + 1 , struct sched_grr_entity , run_list);[m
+[32m+[m		[32mreturn grr_task_of(grr_se);[m
+[32m+[m	[32m}[m
+[32m+[m
+[32m+[m	[32mreturn NULL;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mstatic void put_prev_task_grr(struct rq *rq, struct task_struct *p, struct task_struct *next)[m
+[32m+[m[32m{[m
+[32m+[m	[32m//![m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mstatic inline void set_next_task_grr(struct rq *rq, struct task_struct *p, bool first)[m
+[32m+[m[32m{[m
+[32m+[m	[32m//![m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mstatic void task_tick_grr(struct rq *rq, struct task_struct *p, int queued)[m
+[32m+[m[32m{[m
+[32m+[m	[32mstruct sched_grr_entity *grr_se = &p->grr;[m
+[32m+[m
+[32m+[m	[32mif (--p->grr.time_slice)[m
+[32m+[m		[32mreturn;[m
+[32m+[m
+[32m+[m	[32mp->grr.time_slice = RR_TIMESLICE;[m
+[32m+[m[41m	[m
+[32m+[m	[32mif (grr_se->run_list.prev != grr_se->run_list.next) {[m
+[32m+[m		[32mrequeue_task_grr(rq, p);[m
+[32m+[m		[32mresched_curr(rq);[m
+[32m+[m		[32mreturn;[m
+[32m+[m	[32m}[m
+[32m+[m[41m	[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mstatic unsigned int get_rr_interval_grr(struct rq *rq, struct task_struct *task)[m
+[32m+[m[32m{[m
+[32m+[m	[32mreturn RR_TIMESLICE;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mstatic void prio_changed_grr(struct rq *rq, struct task_struct *p, int oldprio)[m
+[32m+[m[32m{[m
+[32m+[m	[32m//Μπορει να χρειαστει να ελεγξουμε εαν το priority γινει πολυ μικρο και χρειαστει να αλλαξη η κλαση -> call reschedule[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mstatic void switched_to_grr(struct rq *rq, struct task_struct *p)[m
+[32m+[m[32m{[m
+[32m+[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mstatic void update_curr_grr(struct rq *rq)[m
+[32m+[m[32m{[m
+[32m+[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mDEFINE_SCHED_CLASS(grr) = {[m
+[32m+[m
+[32m+[m	[32m.enqueue_task		= enqueue_task_grr,[m
+[32m+[m	[32m.dequeue_task		= dequeue_task_grr,[m
+[32m+[m	[32m.yield_task		= yield_task_grr,[m
+[32m+[m
+[32m+[m	[32m.wakeup_preempt		= wakeup_preempt_grr,[m
+[32m+[m
+[32m+[m	[32m.pick_task		= pick_task_grr,[m
+[32m+[m	[32m.put_prev_task		= put_prev_task_grr,[m
+[32m+[m	[32m.set_next_task          = set_next_task_grr,[m
+[32m+[m
+[32m+[m[32m#ifdef CONFIG_SMP[m
+[32m+[m	[32m.balance		= balance_grr,[m
+[32m+[m	[32m.select_task_rq		= select_task_rq_grr,[m
+[32m+[m	[32m.set_cpus_allowed       = set_cpus_allowed_common,[m
+[32m+[m	[32m.rq_online              = rq_online_grr,[m
+[32m+[m	[32m.rq_offline             = rq_offline_grr,[m
+[32m+[m	[32m.task_woken		= task_woken_grr,[m
+[32m+[m	[32m.switched_from		= switched_from_grr,[m
+[32m+[m	[32m.find_lock_rq		= find_lock_lowest_rq,[m
+[32m+[m[32m#endif[m
+[32m+[m
+[32m+[m	[32m.task_tick		= task_tick_grr,[m
+[32m+[m
+[32m+[m	[32m.get_rr_interval	= get_rr_interval_grr,[m
+[32m+[m
+[32m+[m	[32m.prio_changed		= prio_changed_grr,[m
+[32m+[m	[32m.switched_to		= switched_to_grr,[m
+[32m+[m
+[32m+[m	[32m.update_curr		= update_curr_grr,[m
+[32m+[m[32m};[m
+\ No newline at end of file[m
+[1mdiff --git a/kernel/sched/sched.h b/kernel/sched/sched.h[m
+[1mindex 023b844159c9..9fb6be550fdf 100644[m
+[1m--- a/kernel/sched/sched.h[m
+[1m+++ b/kernel/sched/sched.h[m
+[36m@@ -202,6 +202,15 @@[m [mstatic inline int normal_policy(int policy)[m
+ 	return policy == SCHED_NORMAL;[m
+ }[m
+ [m
+[32m+[m
+[32m+[m[32m//PUCCINI[m
+[32m+[m[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m[32mstatic inline int grr_policy(int policy)[m
+[32m+[m[32m{[m
+[32m+[m	[32mreturn policy == SCHED_GRR;[m
+[32m+[m[32m}[m
+[32m+[m[32m#endif[m
+[32m+[m
+ static inline int fair_policy(int policy)[m
+ {[m
+ 	return normal_policy(policy) || policy == SCHED_BATCH;[m
+[36m@@ -217,8 +226,15 @@[m [mstatic inline int dl_policy(int policy)[m
+ 	return policy == SCHED_DEADLINE;[m
+ }[m
+ [m
+[32m+[m[32m//PUCCINI 2[m
+ static inline bool valid_policy(int policy)[m
+ {[m
+[32m+[m	[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m
+[32m+[m	[32mreturn idle_policy(policy) || fair_policy(policy) ||[m
+[32m+[m		[32mrt_policy(policy) || dl_policy(policy) || grr_policy(policy);[m
+[32m+[m	[32m#endif[m
+[32m+[m
+ 	return idle_policy(policy) || fair_policy(policy) ||[m
+ 		rt_policy(policy) || dl_policy(policy);[m
+ }[m
+[36m@@ -797,6 +813,17 @@[m [mstatic inline int rt_bandwidth_enabled(void)[m
+ # define HAVE_RT_PUSH_IPI[m
+ #endif[m
+ [m
+[32m+[m[32m//PUCCINI 4[m
+[32m+[m
+[32m+[m[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m[32mstruct grr_rq {[m
+[32m+[m	[32mstruct list_head group[2];[m
+[32m+[m	[32munsigned int		grr_nr_running;[m
+[32m+[m[32m};[m
+[32m+[m[32m#endif[m
+[32m+[m
+[32m+[m
+[32m+[m
+ /* Real-Time classes' related field in a runqueue: */[m
+ struct rt_rq {[m
+ 	struct rt_prio_array	active;[m
+[36m@@ -1132,6 +1159,9 @@[m [mstruct rq {[m
+ #define UCLAMP_FLAG_IDLE 0x01[m
+ #endif[m
+ [m
+[32m+[m	[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m	[32mstruct grr_rq		grr;[m
+[32m+[m	[32m#endif[m
+ 	struct cfs_rq		cfs;[m
+ 	struct rt_rq		rt;[m
+ 	struct dl_rq		dl;[m
+[36m@@ -2541,6 +2571,9 @@[m [mextern struct sched_class __sched_class_lowest[];[m
+ extern const struct sched_class stop_sched_class;[m
+ extern const struct sched_class dl_sched_class;[m
+ extern const struct sched_class rt_sched_class;[m
+[32m+[m[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m	[32mextern const struct sched_class grr_sched_class;[m
+[32m+[m[32m#endif[m
+ extern const struct sched_class fair_sched_class;[m
+ extern const struct sched_class idle_sched_class;[m
+ [m
+[36m@@ -3186,7 +3219,9 @@[m [mstatic inline void resched_latency_warn(int cpu, u64 latency) { }[m
+ extern void init_cfs_rq(struct cfs_rq *cfs_rq);[m
+ extern void init_rt_rq(struct rt_rq *rt_rq);[m
+ extern void init_dl_rq(struct dl_rq *dl_rq);[m
+[31m-[m
+[32m+[m[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m	[32mextern void init_grr_rq(struct grr_rq *grr_rq);[m
+[32m+[m[32m#endif[m
+ extern void cfs_bandwidth_usage_inc(void);[m
+ extern void cfs_bandwidth_usage_dec(void);[m
+ [m
+[1mdiff --git a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c[m
+[1mindex 456d339be98f..f2be27c44035 100644[m
+[1m--- a/kernel/sched/syscalls.c[m
+[1m+++ b/kernel/sched/syscalls.c[m
+[36m@@ -1489,14 +1489,17 @@[m [mSYSCALL_DEFINE1(sched_get_priority_max, int, policy)[m
+ 	switch (policy) {[m
+ 	case SCHED_FIFO:[m
+ 	case SCHED_RR:[m
+[31m-		ret = MAX_RT_PRIO-1;[m
+[31m-		break;[m
+[32m+[m	[32mret = MAX_RT_PRIO-1;[m
+[32m+[m	[32mbreak;[m
+ 	case SCHED_DEADLINE:[m
+[32m+[m[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m	[32mcase SCHED_GRR:[m
+[32m+[m[32m#endif[m
+ 	case SCHED_NORMAL:[m
+ 	case SCHED_BATCH:[m
+ 	case SCHED_IDLE:[m
+ 	case SCHED_EXT:[m
+[31m-		ret = 0;[m
+[32m+[m	[32mret = 0;[m
+ 		break;[m
+ 	}[m
+ 	return ret;[m
+[36m@@ -1520,6 +1523,9 @@[m [mSYSCALL_DEFINE1(sched_get_priority_min, int, policy)[m
+ 		ret = 1;[m
+ 		break;[m
+ 	case SCHED_DEADLINE:[m
+[32m+[m[32m#ifdef CONFIG_GRR_SCHED[m
+[32m+[m	[32mcase SCHED_GRR:[m
+[32m+[m[32m#endif[m
+ 	case SCHED_NORMAL:[m
+ 	case SCHED_BATCH:[m
+ 	case SCHED_IDLE:[m

@@ -4510,10 +4510,10 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->rt.on_list		= 0;
 
 #ifdef CONFIG_GRR_SCHED
-	INIT_LIST_HEAD(&p->grr.run_list);
-	p->grr.time_slice = RR_TIMESLICE;
-	p->grr.on_rq = 0 ; 
-	p->grr.prio = current->grr.prio;
+    INIT_LIST_HEAD(&p->grr.run_list);
+    p->grr.time_slice = RR_TIMESLICE;
+    p->grr.on_rq = 0 ; 
+    p->grr.prio = current->grr.prio;
 #endif
 
 #ifdef CONFIG_SCHED_CLASS_EXT
@@ -4741,10 +4741,10 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	 * Revert to default priority/policy on fork if requested.
 	 */
 	if (unlikely(p->sched_reset_on_fork)) {
-	#ifdef CONFIF_GRR_SCHED
-		p->grr.prio = 0;
-		if (task_has_dl_policy(p) || task_has_rt_policy(p) || fair_policy(p->policy)) {
+	#ifdef CONFIG_GRR_SCHED
+		if (task_has_dl_policy(p) || task_has_rt_policy(p)) {
 			p->policy = SCHED_GRR;
+			p->grr.prio = 0;
 			p->static_prio = NICE_TO_PRIO(0);
 			p->rt_priority = 0;
 		}
@@ -4775,14 +4775,16 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 
 	scx_pre_fork(p);
 
-	#ifdef CONFIG_GRR_SCHED
-		if(p->policy == SCHED_GRR){
-			p->sched_class = &grr_sched_class;
-		}
-		else
-	#endif
+
 	if (rt_prio(p->prio)) {
 		p->sched_class = &rt_sched_class;
+	
+#ifdef CONFIG_GRR_SCHED
+
+	}else if(p->policy == SCHED_GRR){
+		p->sched_class = &grr_sched_class;
+		
+#endif
 #ifdef CONFIG_SCHED_CLASS_EXT
 	} else if (task_should_scx(p->policy)) {
 		p->sched_class = &ext_sched_class;
@@ -8873,11 +8875,7 @@ void normalize_rt_tasks(void)
 {
 	struct task_struct *g, *p;
 	struct sched_attr attr = {
-	#ifdef CONFIF_GRR_SCHED
-		.sched_policy = SCHED_GRR,
-	#else
 		.sched_policy = SCHED_NORMAL,
-	#endif
 	};
 
 	read_lock(&tasklist_lock);

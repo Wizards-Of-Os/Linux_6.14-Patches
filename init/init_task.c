@@ -91,7 +91,7 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 	.restart_block	= {
 		.fn = do_no_restart_syscall,
 	},
-#ifdef CONFIF_GRR_SCHED
+#ifdef CONFIG_GRR_SCHED
 	.grr = {
 		.run_list = LIST_HEAD_INIT(init_task.grr.run_list),
 		.time_slice = RR_TIMESLICE,
