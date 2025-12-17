@@ -135,31 +135,23 @@ defined(CONFIG_AUTOFDO_CLANG) || defined(CONFIG_PROPELLER_CLANG)
  */
 
 #ifdef CONFIG_GRR_SCHED
-	
+	#define GRR_SCHED_DATA *(__grr_sched_class)	
+#else 
+	#define GRR_SCHED_DATA
+#endif
+
 #define SCHED_DATA				\
 	STRUCT_ALIGN();				\
 	__sched_class_highest = .;		\
 	*(__stop_sched_class)			\
 	*(__dl_sched_class)			\
 	*(__rt_sched_class)			\
-	*(__grr_sched_class)			\
+	GRR_SCHED_DATA				\
 	*(__fair_sched_class)			\
 	*(__ext_sched_class)			\
 	*(__idle_sched_class)			\
 	__sched_class_lowest = .;
 
-#else
-	#define SCHED_DATA				\
-		STRUCT_ALIGN();				\
-		__sched_class_highest = .;		\
-		*(__stop_sched_class)			\
-		*(__dl_sched_class)			\
-		*(__rt_sched_class)			\
-		*(__fair_sched_class)			\
-		*(__ext_sched_class)			\
-		*(__idle_sched_class)			\
-		__sched_class_lowest = .;
-#endif
 
 /* The actual configuration determine if the init/exit sections
  * are handled as text/data or they can be discarded (which

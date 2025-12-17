@@ -39,6 +39,7 @@ static void enqueue_task_grr(struct rq *rq, struct task_struct *p, int flags)
 	
 	list_add_tail(&grr_se->run_list , grr_rq->group + idx );
 	grr_rq->grr_nr_running++;
+	add_nr_running(rq,1);
 }
 
 static bool dequeue_task_grr(struct rq *rq, struct task_struct *p, int flags)
@@ -48,6 +49,7 @@ static bool dequeue_task_grr(struct rq *rq, struct task_struct *p, int flags)
 	if (!list_empty(&p->grr.run_list)) { 
 		list_del(&p->grr.run_list);
 		grr_rq->grr_nr_running--;
+		sub_nr_running(rq,1);
 		return true;
 	}
 	return false;

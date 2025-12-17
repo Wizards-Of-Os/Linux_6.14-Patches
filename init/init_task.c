@@ -17,6 +17,7 @@
 
 #include <linux/uaccess.h>
 
+
 static struct signal_struct init_signals = {
 	.nr_threads	= 1,
 	.thread_head	= LIST_HEAD_INIT(init_task.thread_node),
@@ -63,6 +64,13 @@ unsigned long init_shadow_call_stack[SCS_SIZE / sizeof(long)] = {
  * Set up the first task table, touch at your own risk!. Base=0,
  * limit=0x1fffff (=2MB)
  */
+
+#ifdef CONFIG_GRR_SCHED
+	#define INIT_SCHED SCHED_GRR
+#else
+	#define INIT_SCHED SCHED_NORMAL
+#endif
+
 struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 	.thread_info	= INIT_THREAD_INFO(init_task),
@@ -75,11 +83,7 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 	.prio		= MAX_PRIO - 20,
 	.static_prio	= MAX_PRIO - 20,
 	.normal_prio	= MAX_PRIO - 20,
-#ifdef CONFIG_GRR_SCHED
-	.policy		= SCHED_GRR,
-#else
-	.policy		= SCHED_NORMAL,
-#endif
+	.policy = INIT_SCHED,
 	.cpus_ptr	= &init_task.cpus_mask,
 	.user_cpus_ptr	= NULL,
 	.cpus_mask	= CPU_MASK_ALL,
