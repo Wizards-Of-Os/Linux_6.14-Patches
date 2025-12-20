@@ -24,7 +24,7 @@ void init_grr_rq(struct grr_rq *grr_rq)
 {
 	INIT_LIST_HEAD(grr_rq->group);
 	INIT_LIST_HEAD(grr_rq->group + 1);
-	grr_rq->grr_nr_running = 0 ; 
+	grr_rq->grr_nr_running = 0; 
 	grr_rq->lb_timeslice = LB_TIMESLICE;
 	cpD = (*)cpumask_of(0);
 	cpP = (*)cpumask_of(nr_cpu_ids / 2);
@@ -43,7 +43,7 @@ static void requeue_task_grr(struct rq *rq, struct task_struct *p)
 {	
 	struct sched_grr_entity *grr_se = &p->grr;
 	struct grr_rq * grr_rq = &rq->grr;
-	int idx = grr_se->prio ;
+	int idx = grr_se->prio;
 
 	list_move_tail(&grr_se->run_list, grr_rq->group + idx);
 }
@@ -57,25 +57,25 @@ static void enqueue_task_grr(struct rq *rq, struct task_struct *p, int flags)
 {
 	struct sched_grr_entity *grr_se = &p->grr;
 	struct grr_rq * grr_rq = &rq->grr;
-	int idx = grr_se->prio ;
+	int idx = grr_se->prio;
 
-	if (idx >1 || idx < 0) {
-		return ; 
-	}
-	
-	list_add_tail(&grr_se->run_list , grr_rq->group + idx );
-	grr_rq->grr_nr_running++;
-	add_nr_running(rq,1);
+	if (idx > 1 || idx < 0)
+		return ;
+
+	list_add_tail(&grr_se->run_list, grr_rq->group + idx);
+	++grr_rq->grr_nr_running;
+	add_nr_running(rq, 1);
 }
 
 static bool dequeue_task_grr(struct rq *rq, struct task_struct *p, int flags)
 {	
 	struct grr_rq * grr_rq = &rq->grr;
 
+	update_curr_grr(rq);
 	if (!list_empty(&p->grr.run_list)) { 
 		list_del(&p->grr.run_list);
-		grr_rq->grr_nr_running--;
-		sub_nr_running(rq,1);
+		--grr_rq->grr_nr_running;
+		sub_nr_running(rq, 1);
 		return true;
 	}
 	return false;
@@ -93,13 +93,13 @@ static struct task_struct *pick_task_grr(struct rq *rq)
 	struct grr_rq *grr_rq = &rq->grr;
 	struct sched_grr_entity *grr_se; 
 
-	if(!list_empty(grr_rq->group)) {
-		grr_se = list_first_entry( grr_rq->group , struct sched_grr_entity , run_list);
-		return grr_task_of(grr_se);
-	}
-	
 	if(!list_empty(grr_rq->group + 1)) {
 		grr_se = list_first_entry( grr_rq->group + 1 , struct sched_grr_entity , run_list);
+		return grr_task_of(grr_se);
+	}
+
+	if(!list_empty(grr_rq->group)) {
+		grr_se = list_first_entry( grr_rq->group , struct sched_grr_entity , run_list);
 		return grr_task_of(grr_se);
 	}
 
@@ -108,12 +108,12 @@ static struct task_struct *pick_task_grr(struct rq *rq)
 
 static void put_prev_task_grr(struct rq *rq, struct task_struct *p, struct task_struct *next)
 {
-	//!
+	update_curr_grr(rq);
 }
 
 static inline void set_next_task_grr(struct rq *rq, struct task_struct *p, bool first)
 {
-	//!
+	p->se.exec_start = rq_clock_task(rq);
 }
 
 static void load_balance_grr(void)
@@ -134,7 +134,8 @@ static void load_balance_grr(void)
 static void task_tick_grr(struct rq *rq, struct task_struct *p, int queued)
 {
 	struct sched_grr_entity *grr_se = &p->grr;
-
+	
+	update_curr_grr(rq);
 	if (--p->grr.time_slice)
 		return;
 
@@ -165,7 +166,7 @@ static void switched_to_grr(struct rq *rq, struct task_struct *p)
 
 static void update_curr_grr(struct rq *rq)
 {
-
+	update_curr_common(rq);
 }
 
 DEFINE_SCHED_CLASS(grr) = {
