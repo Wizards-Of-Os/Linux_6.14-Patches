@@ -1,6 +1,7 @@
 #define GRR_DEFAULT 1
 #define GRR_PERFORMANCE 2
 
+#ifdef CONFIG_SMP
 #define LB_TIMESLICE 500 * HZ / 1000
 
 cpumask_t cpD = {};
@@ -20,18 +21,22 @@ void init_grr_locks(void)
 	raw_spin_lock_init(&alberto);
 }
 
+#endif
+
 void init_grr_rq(struct grr_rq *grr_rq)
 {
 	INIT_LIST_HEAD(grr_rq->group);
 	INIT_LIST_HEAD(grr_rq->group + 1);
 	grr_rq->grr_nr_running = 0; 
 	grr_rq->lb_timeslice = LB_TIMESLICE;
+	#ifdef CONFIG_SMP
 	cpD = (*)cpumask_of(0);
 	cpP = (*)cpumask_of(nr_cpu_ids / 2);
 	for (int i = 1; i < nr_cpu_ids / 2; i ++) {
 		cpumask_or(&cpD, cpumask_of(i), cpD);
 		cpumask_or(&cpP, cpumask_of(nr_cpu_ids / 2 + i), cpP);
 	}
+	#endif
 }
 
 static inline struct task_struct *grr_task_of(struct sched_grr_entity *grr_se)
@@ -116,9 +121,11 @@ static inline void set_next_task_grr(struct rq *rq, struct task_struct *p, bool 
 	p->se.exec_start = rq_clock_task(rq);
 }
 
+#ifdef CONFIG_SMP
+
 static void load_balance_grr(void)
 {
-	struct *rq this_rq = this_rq();
+	struct rq* this_rq = this_rq();
 	if (--this_rq->grr.lb_timeslice)
 		return;
 	this_rq->grr.lb_timeslice = LB_TIMESLICE;
@@ -130,6 +137,8 @@ static void load_balance_grr(void)
 	//swap
 
 }
+
+#endif
 
 static void task_tick_grr(struct rq *rq, struct task_struct *p, int queued)
 {
