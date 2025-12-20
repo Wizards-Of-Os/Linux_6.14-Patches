@@ -8577,7 +8577,9 @@ void __init sched_init(void)
 	INIT_LIST_HEAD(&root_task_group.siblings);
 	autogroup_init(&init_task);
 #endif /* CONFIG_CGROUP_SCHED */
-
+	#ifdef CONFIG_GRR_SCHED && CONFIG_SMP
+		int_grr_locks();
+	#endif
 	for_each_possible_cpu(i) {
 		struct rq *rq;
 

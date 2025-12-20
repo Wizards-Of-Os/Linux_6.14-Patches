@@ -819,6 +819,7 @@ static inline int rt_bandwidth_enabled(void)
 struct grr_rq {
 	struct list_head group[2];
 	unsigned int		grr_nr_running;
+	unsigned int 		lb_timeslice;
 };
 #endif
 
@@ -3221,6 +3222,9 @@ extern void init_rt_rq(struct rt_rq *rt_rq);
 extern void init_dl_rq(struct dl_rq *dl_rq);
 #ifdef CONFIG_GRR_SCHED
 	extern void init_grr_rq(struct grr_rq *grr_rq);
+	#ifdef CONFIG_SMP
+		extern void init_grr_locks(void);
+	#endif
 #endif
 extern void cfs_bandwidth_usage_inc(void);
 extern void cfs_bandwidth_usage_dec(void);
