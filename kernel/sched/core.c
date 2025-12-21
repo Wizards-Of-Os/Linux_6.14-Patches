@@ -8478,6 +8478,9 @@ void __init sched_init_smp(void)
 
 	init_sched_rt_class();
 	init_sched_dl_class();
+#ifdef CONFIG_GRR_SCHED  
+	init_sched_grr_class();
+#endif
 
 	sched_smp_initialized = true;
 }
@@ -8588,11 +8591,7 @@ void __init sched_init(void)
 	INIT_LIST_HEAD(&root_task_group.siblings);
 	autogroup_init(&init_task);
 #endif /* CONFIG_CGROUP_SCHED */
-	#ifdef CONFIG_GRR_SCHED  
-		#ifdef CONFIG_SMP
-			init_grr_locks();
-		#endif
-	#endif
+
 	for_each_possible_cpu(i) {
 		struct rq *rq;
 
