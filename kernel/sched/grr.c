@@ -1,12 +1,9 @@
-#define GRR_DEFAULT 1
-#define GRR_PERFORMANCE 2
+#include <linux/sched/grr.h>
 
 #ifdef CONFIG_SMP
 
-#define LB_TIMESLICE 500 * HZ / 1000
-
-cpumask_t cp_d = {};
-cpumask_t cp_p = {};
+cpumask_t cp_d;
+cpumask_t cp_p;
 
 raw_spinlock_t bl_d;
 raw_spinlock_t bl_p;
@@ -152,7 +149,7 @@ static unsigned int get_rr_interval_grr(struct rq *rq, struct task_struct *task)
 
 static void prio_changed_grr(struct rq *rq, struct task_struct *p, int oldprio)
 {
-	//Μπορει να χρειαστει να ελεγξουμε εαν το priority γινει πολυ μικρο και χρειαστει να αλλαξη η κλαση -> call reschedule
+	
 }
 
 static void switched_to_grr(struct rq *rq, struct task_struct *p)
@@ -165,7 +162,7 @@ static void switched_to_grr(struct rq *rq, struct task_struct *p)
 
 static int find_busiest_cpu(cpumask_t * group_mask)
 {		
-	int cpu, max = -1, max_cpu ;
+	int cpu, max = -1, max_cpu = 0;
 	struct rq * rq ; 
 	
 	for_each_cpu(cpu , group_mask){
@@ -181,7 +178,7 @@ static int find_busiest_cpu(cpumask_t * group_mask)
 
 static int find_idlest_cpu(cpumask_t * group_mask)
 {		
-	int cpu, min = INT_MAX, min_cpu;
+	int cpu, min = INT_MAX, min_cpu=0;
 	struct rq * rq ; 
 	
 	for_each_cpu(cpu , group_mask){
@@ -195,11 +192,11 @@ static int find_idlest_cpu(cpumask_t * group_mask)
 }
 
 
-static void load_balance_grr(void)
+void load_balance_grr(struct rq * this_rq)
 {
 
 	int cpu , busiest_cpu , idlest_cpu , perf = 0 ;
-	struct rq* this_rq = this_rq() , *busiest_rq , *idlest_rq ;
+	struct rq *busiest_rq , *idlest_rq ;
 
 
 	if (--this_rq->grr.lb_timeslice)
@@ -251,7 +248,7 @@ static void load_balance_grr(void)
 	double_raw_unlock(&busiest_rq->__lock , &idlest_rq->__lock);
 unlock:
 	perf? raw_spin_unlock(&bl_p) : raw_spin_unlock(&bl_d);
-
+	printk_deferred(KERN_INFO "GRR BUSIEST CPU: %d , IDLEST_CPU: %d , NR_RUNNNING_BUSIEST: %d , NR_RUNNING_IDLEST: %d , TASK_PID: %d , TASK_POLICY: %d\n" , busiest_cpu , idlest_cpu , busiest_rq->nr_running , idlest_rq->nr_running , task->pid , task->policy );
 }
 
 
@@ -259,7 +256,7 @@ static int select_task_rq_grr(struct task_struct *p, int cpu, int flags)
 {
 	return cpu;
 }
-
+	
 #endif
 
 

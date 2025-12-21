@@ -7,6 +7,11 @@
  *  Copyright (C) 1991-2002  Linus Torvalds
  *  Copyright (C) 1998-2024  Ingo Molnar, Red Hat
  */
+
+#ifdef CONFIG_GRR_SCHED
+#include <linux/sched/grr.h>
+#endif
+
 #include <linux/highmem.h>
 #include <linux/hrtimer_api.h>
 #include <linux/ktime_api.h>
@@ -5702,10 +5707,16 @@ void sched_tick(void)
 		wq_worker_tick(donor);
 
 #ifdef CONFIG_SMP
+
 	if (!scx_switched_all()) {
 		rq->idle_balance = idle_cpu(cpu);
 		sched_balance_trigger(rq);
 	}
+
+	#ifdef CONFIG_GRR_SCHED
+		load_balance_grr(rq);
+	#endif
+	
 #endif
 }
 
