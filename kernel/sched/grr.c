@@ -2,25 +2,21 @@
 #define GRR_PERFORMANCE 2
 
 #ifdef CONFIG_SMP
+
 #define LB_TIMESLICE 500 * HZ / 1000
 
-cpumask_t cpD = {};
-cpumask_t cpP = {};
+cpumask_t cp_d = {};
+cpumask_t cp_p = {};
 
-//PUCCINI 3.0
-raw_spinlock_t giannis;
-raw_spinlock_t thanos;
-raw_spinlock_t vaggos;
-raw_spinlock_t alberto;
+raw_spinlock_t bl_d;
+raw_spinlock_t bl_p;
 
 void init_grr_locks(void)
 {
-	raw_spin_lock_init(&giannis);
-	raw_spin_lock_init(&thanos);
-	raw_spin_lock_init(&vaggos);
-	raw_spin_lock_init(&alberto);
-}
-
+	raw_spin_lock_init(&bl_d);
+	raw_spin_lock_init(&bl_p);
+}	
+	
 #endif
 
 void init_grr_rq(struct grr_rq *grr_rq)
@@ -28,15 +24,24 @@ void init_grr_rq(struct grr_rq *grr_rq)
 	INIT_LIST_HEAD(grr_rq->group);
 	INIT_LIST_HEAD(grr_rq->group + 1);
 	grr_rq->grr_nr_running = 0; 
-	grr_rq->lb_timeslice = LB_TIMESLICE;
+
 	#ifdef CONFIG_SMP
-	cpD = (*)cpumask_of(0);
-	cpP = (*)cpumask_of(nr_cpu_ids / 2);
+
+	grr_rq->lb_timeslice = LB_TIMESLICE;
+	cpumask_copy(&cp_d, cpumask_of(0));
+	cpumask_copy(&cp_p, cpumask_of(nr_cpu_ids / 2));
+	
 	for (int i = 1; i < nr_cpu_ids / 2; i ++) {
-		cpumask_or(&cpD, cpumask_of(i), cpD);
-		cpumask_or(&cpP, cpumask_of(nr_cpu_ids / 2 + i), cpP);
+		cpumask_or(&cp_d, cpumask_of(i), &cp_d);
+		cpumask_or(&cp_p, cpumask_of(nr_cpu_ids / 2 + i), &cp_p);
 	}
+
 	#endif
+}
+
+static void update_curr_grr(struct rq *rq)
+{
+	update_curr_common(rq);
 }
 
 static inline struct task_struct *grr_task_of(struct sched_grr_entity *grr_se)
@@ -121,24 +126,6 @@ static inline void set_next_task_grr(struct rq *rq, struct task_struct *p, bool 
 	p->se.exec_start = rq_clock_task(rq);
 }
 
-#ifdef CONFIG_SMP
-
-static void load_balance_grr(void)
-{
-	struct rq* this_rq = this_rq();
-	if (--this_rq->grr.lb_timeslice)
-		return;
-	this_rq->grr.lb_timeslice = LB_TIMESLICE;
-
-	//find_busiest
-
-	//find_lowest
-	
-	//swap
-
-}
-
-#endif
 
 static void task_tick_grr(struct rq *rq, struct task_struct *p, int queued)
 {
@@ -173,10 +160,108 @@ static void switched_to_grr(struct rq *rq, struct task_struct *p)
 
 }
 
-static void update_curr_grr(struct rq *rq)
-{
-	update_curr_common(rq);
+
+#ifdef CONFIG_SMP
+
+static int find_busiest_cpu(cpumask_t * group_mask)
+{		
+	int cpu, max = -1, max_cpu ;
+	struct rq * rq ; 
+	
+	for_each_cpu(cpu , group_mask){
+		rq = cpu_rq(cpu);
+		if(rq->nr_running > max){
+			max = rq->nr_running;
+			max_cpu = cpu;
+		}
+	}
+	return max_cpu;
 }
+
+
+static int find_idlest_cpu(cpumask_t * group_mask)
+{		
+	int cpu, min = INT_MAX, min_cpu;
+	struct rq * rq ; 
+	
+	for_each_cpu(cpu , group_mask){
+		rq = cpu_rq(cpu);
+		if(rq->nr_running < min){
+			min = rq->nr_running;
+			min_cpu = cpu;
+		}
+	}
+	return min_cpu;
+}
+
+
+static void load_balance_grr(void)
+{
+
+	int cpu , busiest_cpu , idlest_cpu , perf = 0 ;
+	struct rq* this_rq = this_rq() , *busiest_rq , *idlest_rq ;
+
+
+	if (--this_rq->grr.lb_timeslice)
+		return;
+	
+	this_rq->grr.lb_timeslice = LB_TIMESLICE;
+
+	cpu =  smp_processor_id();
+
+	raw_spin_lock(&bl_d);
+
+	if(cpumask_test_cpu(cpu , &cp_d)){
+		busiest_cpu = find_busiest_cpu(&cp_d);
+		idlest_cpu = find_idlest_cpu(&cp_d);
+	}
+	else{
+		raw_spin_unlock(&bl_d);
+		raw_spin_lock(&bl_p);
+		perf=1;
+		busiest_cpu = find_busiest_cpu(&cp_p);
+		idlest_cpu = find_idlest_cpu(&cp_p);
+	}
+
+	busiest_rq = cpu_rq(busiest_cpu);
+	idlest_rq = cpu_rq(idlest_cpu);
+
+	if( (busiest_cpu == idlest_cpu) || (busiest_rq->nr_running - idlest_rq->nr_running ) <=1 )
+		goto unlock;
+	
+	double_raw_lock(&busiest_rq->__lock , &idlest_rq->__lock);
+
+	struct grr_rq * grr = &busiest_rq->grr ;
+	struct list_head * iterator = grr->group + perf; 
+	struct task_struct * task ; 
+
+	if(busiest_rq->curr->sched_class == &grr_sched_class)
+		iterator= iterator->next;
+
+	list_for_each_continue(iterator, grr->group + perf){
+		task = list_entry(iterator ,struct task_struct , grr.run_list );
+		if(cpumask_test_cpu(idlest_cpu , task->cpus_ptr)){
+			dequeue_task_grr(busiest_rq , task , 0);
+			set_task_cpu(task, idlest_cpu);
+			enqueue_task_grr(idlest_rq , task , 0);
+			break;
+		}
+	}
+
+	double_raw_unlock(&busiest_rq->__lock , &idlest_rq->__lock);
+unlock:
+	perf? raw_spin_unlock(&bl_p) : raw_spin_unlock(&bl_d);
+
+}
+
+
+static int select_task_rq_grr(struct task_struct *p, int cpu, int flags)
+{
+	return cpu;
+}
+
+#endif
+
 
 DEFINE_SCHED_CLASS(grr) = {
 
@@ -191,14 +276,9 @@ DEFINE_SCHED_CLASS(grr) = {
 	.set_next_task          = set_next_task_grr,
 
 #ifdef CONFIG_SMP
-	.balance		= balance_grr,
 	.select_task_rq		= select_task_rq_grr,
 	.set_cpus_allowed       = set_cpus_allowed_common,
-	.rq_online              = rq_online_grr,
-	.rq_offline             = rq_offline_grr,
-	.task_woken		= task_woken_grr,
-	.switched_from		= switched_from_grr,
-	.find_lock_rq		= find_lock_lowest_rq,
+
 #endif
 
 	.task_tick		= task_tick_grr,
