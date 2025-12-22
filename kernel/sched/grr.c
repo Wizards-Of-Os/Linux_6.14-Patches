@@ -4,6 +4,7 @@
 
 cpumask_t cp_d;
 cpumask_t cp_p;
+cpumask_t cp_tmp; // used in select_task_rq_grr
 
 raw_spinlock_t bl_d;
 raw_spinlock_t bl_p;
@@ -215,7 +216,9 @@ static int find_idlest_cpu(cpumask_t * group_mask)
 
 void load_balance_grr(struct rq * this_rq)
 {
-	int cpu, busiest_cpu, idlest_cpu, perf = 0 ;
+	int cpu, busiest_cpu, idlest_cpu;
+	int task_group; // GRR Group of the selected task
+	int cpu_group = 0; // GRR Group that the current cpu belongs to
 	struct rq *busiest_rq, *idlest_rq ;
 
 
@@ -225,7 +228,6 @@ void load_balance_grr(struct rq * this_rq)
 	this_rq->grr.lb_timeslice = LB_TIMESLICE;
 
 	cpu =  smp_processor_id();
-
 	raw_spin_lock(&bl_d);
 	if(cpumask_test_cpu(cpu , &cp_d)){
 		busiest_cpu = find_busiest_cpu(&cp_d);
@@ -233,27 +235,25 @@ void load_balance_grr(struct rq * this_rq)
 	}
 	else{
 		raw_spin_unlock(&bl_d);
-		perf = 1;
+		cpu_group = 1;
 		raw_spin_lock(&bl_p);
 		busiest_cpu = find_busiest_cpu(&cp_p);
 		idlest_cpu = find_idlest_cpu(&cp_p);
 	}
 	busiest_rq = cpu_rq(busiest_cpu);
 	idlest_rq = cpu_rq(idlest_cpu);
-
 	if((busiest_cpu == idlest_cpu) || (busiest_rq->nr_running - idlest_rq->nr_running ) <= 1)
 		goto unlock;
 	double_raw_lock(&busiest_rq->__lock , &idlest_rq->__lock);
 
 	struct grr_rq *grr = &busiest_rq->grr;
-	if(list_empty(grr->group + perf))
-		perf = !perf;
+	task_group = list_empty(grr->group + cpu_group) ? !cpu_group : cpu_group; // The current group is empty, attempt to do foreign balance
 
-	struct list_head *iterator = grr->group + perf;
+	struct list_head *iterator = grr->group + task_group;
 	struct task_struct *task;
 	if(busiest_rq->curr->sched_class == &grr_sched_class)
 		iterator = iterator->next;
-	list_for_each_continue(iterator, grr->group + perf){
+	list_for_each_continue(iterator, grr->group + task_group){
 		task = list_entry(iterator, struct task_struct, grr.run_list);
 		if(cpumask_test_cpu(idlest_cpu, task->cpus_ptr)){
 			task->on_rq = TASK_ON_RQ_MIGRATING;
@@ -267,7 +267,7 @@ void load_balance_grr(struct rq * this_rq)
 
 	double_raw_unlock(&busiest_rq->__lock , &idlest_rq->__lock);
 unlock:
-	perf ? raw_spin_unlock(&bl_p) : raw_spin_unlock(&bl_d);
+	cpu_group ? raw_spin_unlock(&bl_p) : raw_spin_unlock(&bl_d);
 }
 
 
@@ -276,12 +276,12 @@ static int select_task_rq_grr(struct task_struct *p, int cpu, int flags)
 	struct cpumask *group_mask;
 
 	group_mask = p->grr.prio ? &cp_p : &cp_d;
-	cpumask_and(group_mask, group_mask, p->cpus_ptr);
+	cpumask_and(&cp_tmp, group_mask, p->cpus_ptr);
 
-	if(cpumask_empty(group_mask))
+	if(cpumask_empty(&cp_tmp))
 		return cpu;
 
-	return find_idlest_cpu(group_mask);
+	return find_idlest_cpu(&cp_tmp);
 }
 	
 #endif
