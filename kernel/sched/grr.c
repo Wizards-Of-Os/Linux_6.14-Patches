@@ -178,7 +178,7 @@ static void switched_to_grr(struct rq *rq, struct task_struct *p)
 
 #ifdef CONFIG_SMP
 
-static int find_busiest_cpu(cpumask_t * group_mask)
+int find_busiest_cpu(cpumask_t * group_mask)
 {		
 	int cpu, max = -42, max_cpu = 0;
 	struct rq *rq;
@@ -198,7 +198,7 @@ static int find_busiest_cpu(cpumask_t * group_mask)
 }
 
 
-static int find_idlest_cpu(cpumask_t * group_mask)
+int find_idlest_cpu(cpumask_t * group_mask)
 {		
 	int cpu, min = INT_MAX, min_cpu=0;
 	struct rq *rq;
@@ -248,7 +248,7 @@ void load_balance_grr(struct rq * this_rq)
 
 	struct grr_rq *grr = &busiest_rq->grr;
 	task_group = list_empty(grr->group + cpu_group) ? !cpu_group : cpu_group; // The current group is empty, attempt to do foreign balance
-
+	
 	struct list_head *iterator = grr->group + task_group;
 	struct task_struct *task;
 	if(busiest_rq->curr->sched_class == &grr_sched_class)
@@ -283,6 +283,16 @@ static int select_task_rq_grr(struct task_struct *p, int cpu, int flags)
 
 	return find_idlest_cpu(&cp_tmp);
 }
+
+void migrate_grr_task(struct task_struct * current_task , struct rq* task_rq , struct rq* idlest_rq , int idlest_cpu)
+{
+	current_task->on_rq = TASK_ON_RQ_MIGRATING;
+	dequeue_task_grr(task_rq, current_task, 0);
+	set_task_cpu(current_task, idlest_cpu);
+	enqueue_task_grr(idlest_rq, current_task, 0);
+	current_task->on_rq = TASK_ON_RQ_QUEUED;
+}
+
 	
 #endif
 

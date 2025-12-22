@@ -16,7 +16,13 @@
 
 #ifdef CONFIG_SMP
 
+extern cpumask_t cp_d;
+extern cpumask_t cp_p;
+
+int find_idlest_cpu(cpumask_t * );
+int find_busiest_cpu(cpumask_t * );
 void load_balance_grr(struct rq *);
+void migrate_grr_task(struct task_struct * , struct rq* , struct rq*  , int);
 
 #define LB_TIMESLICE 500 * HZ / 1000
 
