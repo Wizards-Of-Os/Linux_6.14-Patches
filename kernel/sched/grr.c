@@ -4,7 +4,6 @@
 
 cpumask_t cp_d;
 cpumask_t cp_p;
-cpumask_t cp_tmp; // used in select_task_rq_grr
 
 raw_spinlock_t bl_d;
 raw_spinlock_t bl_p;
@@ -33,6 +32,7 @@ void init_grr_rq(struct grr_rq *grr_rq)
 	grr_rq->perf_bias = PERF_BIAS;
 	grr_rq->def_bias = DEF_BIAS;
 #ifdef CONFIG_SMP
+	raw_spin_lock_init(grr_rq->mask_lock);
 	grr_rq->lb_timeslice = LB_TIMESLICE;
 #endif
 }
@@ -256,11 +256,7 @@ void load_balance_grr(struct rq * this_rq)
 	list_for_each_continue(iterator, grr->group + task_group){
 		task = list_entry(iterator, struct task_struct, grr.run_list);
 		if(cpumask_test_cpu(idlest_cpu, task->cpus_ptr)){
-			task->on_rq = TASK_ON_RQ_MIGRATING;
-			dequeue_task_grr(busiest_rq, task, 0);
-			set_task_cpu(task, idlest_cpu);
-			enqueue_task_grr(idlest_rq, task, 0);
-			task->on_rq = TASK_ON_RQ_QUEUED;
+			migrate_grr_task(task , busiest_rq , idlest_rq, idlest_cpu);
 			break;
 		}
 	}
@@ -273,15 +269,19 @@ unlock:
 
 static int select_task_rq_grr(struct task_struct *p, int cpu, int flags)
 {
-	struct cpumask *group_mask;
+	struct cpumask *group_mask , *tmp_mask;
+	struct rq * task_rq ; 
+
+	task_rq = this_rq();
+	tmp_mask = &task_rq->grr.temp_mask;
 
 	group_mask = p->grr.prio ? &cp_p : &cp_d;
-	cpumask_and(&cp_tmp, group_mask, p->cpus_ptr);
+	cpumask_and(tmp_mask, group_mask, p->cpus_ptr);
 
-	if(cpumask_empty(&cp_tmp))
+	if(cpumask_empty(tmp_mask))
 		return cpu;
 
-	return find_idlest_cpu(&cp_tmp);
+	return find_idlest_cpu(tmp_mask);
 }
 
 void migrate_grr_task(struct task_struct * current_task , struct rq* task_rq , struct rq* idlest_rq , int idlest_cpu)

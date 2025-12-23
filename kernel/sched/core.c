@@ -10775,41 +10775,48 @@ static int do_sched_assign_process_to_group(pid_t pid, int group)
 	//Check if task with the given pid exists
 	struct pid *p;
 	struct task_struct *task;
+	int return_value;
+
+	read_lock(&tasklist_lock);
 
 	p = find_get_pid(pid);
 	if (!p) {
-    	return -EINVAL;
+    	return_value = -EINVAL;
+		goto unlock;
 	}
 
 	task = get_pid_task(p, PIDTYPE_PID);
 	put_pid(p);
 
 	if(task->sched_class != &grr_sched_class) { 
-		return -EINVAL;
+		return_value = -EINVAL;
+		goto unlock;
 	}
 
 	if (task->grr.on_rq == 0){
 		task->grr.prio = group-1 ; 
-		return 0 ;
+		return_value = 0;
+		goto unlock;
 	}
 
 	if (task->grr.prio == group-1 ){
-		return 0 ;
+		return_value = 0;
+		goto unlock;
 	}
-
 
 	struct task_struct * current_task ; 
 	struct cpumask *group_mask , *temp_mask ; 
 	int idlest_cpu  , cpu; 
-	struct rq *task_rq, *idlest_rq ;
+	struct rq *task_rq, *idlest_rq , * cpu_rq ;
+
+	cpu_rq = this_rq();
+	temp_mask = &cpu_rq->grr.temp_mask;
 
 	group_mask = group -1 ? &cp_p : &cp_d;
-
-	read_lock(&tasklist_lock);
 	
 	for_each_thread(task,current_task){
 		cpumask_and(temp_mask, group_mask, current_task->cpus_ptr);
-		if(!cpumask_empty(temp_mask)){
+		if (!cpumask_empty(temp_mask)) {
 			current_task->grr.prio = group -1 ;
 			idlest_cpu = find_idlest_cpu(temp_mask);
 			cpu = task_cpu(current_task);
@@ -10825,12 +10832,13 @@ static int do_sched_assign_process_to_group(pid_t pid, int group)
 		}
 		else{
 			read_unlock(&tasklist_lock);
-			return -1;
+			return -EINVAL;
 		}
 	}
 
+unlock:
 	read_unlock(&tasklist_lock);
-	return 0; 
+	return return_value; 
 }	
 
 SYSCALL_DEFINE2(sched_assign_ncores_to_group, int , ncores, int , group)

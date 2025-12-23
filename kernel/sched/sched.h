@@ -822,6 +822,8 @@ struct grr_rq {
 	unsigned int perf_bias;
 	unsigned int def_bias;
 #ifdef CONFIG_SMP
+	rawspin_lock_t      mask_lock;
+	cpumask_t 			temp_mask;
 	unsigned int 		lb_timeslice;
 #endif
 };
