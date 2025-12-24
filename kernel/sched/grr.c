@@ -34,6 +34,7 @@ void init_grr_rq(struct grr_rq *grr_rq)
 	grr_rq->def_bias = DEF_BIAS;
 #ifdef CONFIG_SMP
 	raw_spin_lock_init(&grr_rq->mask_lock);
+	//raw_spin_lock_init(&grr_rq->balance_lock);
 	grr_rq->lb_timeslice = LB_TIMESLICE;
 #endif
 }
@@ -46,6 +47,30 @@ static void update_curr_grr(struct rq *rq)
 static inline struct task_struct *grr_task_of(struct sched_grr_entity *grr_se)
 {
 	return container_of(grr_se, struct task_struct, grr);
+}
+
+inline void migrate_all_grr_tasks(struct rq *src_rq, struct rq *pref_dest_rq, int group)
+{
+	struct task_struct *curr_task;
+	struct rq *dest_rq;
+	struct rq *curr_rq = this_rq();
+	cpumask_t *tmp_mask = &curr_rq->grr.temp_mask;
+	int pref_dest_cpu = pref_dest_rq->cpu;
+
+	struct cpumask *group_mask = group ? &cp_p : &cp_d;
+
+	list_for_each_entry(curr_task, src_rq->grr.group + group, grr.run_list) {
+		cpumask_and(tmp_mask, group_mask, curr_task->cpus_ptr);
+		if(cpumask_empty(tmp_mask))
+			continue;
+
+		if (cpumask_test_cpu(pref_dest_cpu, tmp_mask))
+			dest_rq = pref_dest_rq;
+		else
+			dest_rq = cpu_rq(cpumask_any(tmp_mask));
+
+		migrate_grr_task(curr_task, src_rq, dest_rq);
+	}
 }
 
 static void requeue_task_grr(struct rq *rq, struct task_struct *p)
@@ -72,6 +97,7 @@ static void enqueue_task_grr(struct rq *rq, struct task_struct *p, int flags)
 		return;
 
 	list_add_tail(&grr_se->run_list, grr_rq->group + idx);
+	grr_se->on_rq = 1;
 	++grr_rq->grr_nr_running;
 	add_nr_running(rq, 1);
 }
@@ -83,6 +109,7 @@ static bool dequeue_task_grr(struct rq *rq, struct task_struct *p, int flags)
 	update_curr_grr(rq);
 	if (!list_empty(&p->grr.run_list)) {
 		list_del(&p->grr.run_list);
+		p->grr.on_rq = 0;
 		--grr_rq->grr_nr_running;
 		sub_nr_running(rq, 1);
 		return true;
@@ -229,6 +256,8 @@ void load_balance_grr(struct rq *this_rq)
 
 	this_rq->grr.lb_timeslice = LB_TIMESLICE;
 
+	//raw_spin_lock(&this_rq->balance_lock);
+
 	cpu =  smp_processor_id();
 	raw_spin_lock(&bl_d);
 	if (cpumask_test_cpu(cpu, &cp_d)) {
@@ -260,7 +289,7 @@ void load_balance_grr(struct rq *this_rq)
 	list_for_each_continue(iterator, grr->group + task_group) {
 		task = list_entry(iterator, struct task_struct, grr.run_list);
 		if (cpumask_test_cpu(idlest_cpu, task->cpus_ptr)) {
-			migrate_grr_task(task, busiest_rq, idlest_rq, idlest_cpu);
+			migrate_grr_task(task, busiest_rq, idlest_rq);
 			break;
 		}
 	}
@@ -268,6 +297,7 @@ void load_balance_grr(struct rq *this_rq)
 	double_raw_unlock(&busiest_rq->__lock, &idlest_rq->__lock);
 unlock:
 	cpu_group ? raw_spin_unlock(&bl_p) : raw_spin_unlock(&bl_d);
+	//raw_spin_unlock(&this_rq->balance_lock);
 }
 
 
@@ -298,8 +328,10 @@ unlock:
 }
 
 void migrate_grr_task(struct task_struct *current_task,
-	struct rq *task_rq, struct rq *idlest_rq, int idlest_cpu)
+	struct rq *task_rq, struct rq *idlest_rq)
 {
+	int idlest_cpu = idlest_rq->cpu;
+
 	current_task->on_rq = TASK_ON_RQ_MIGRATING;
 	dequeue_task_grr(task_rq, current_task, 0);
 	set_task_cpu(current_task, idlest_cpu);

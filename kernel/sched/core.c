@@ -10747,6 +10747,26 @@ void sched_enq_and_set_task(struct sched_enq_and_set_ctx *ctx)
 
 #ifdef CONFIG_GRR_SCHED
 
+inline void lock_grr_masks(void)
+{
+	struct rq *rq_i;
+	int cpu;
+	for_each_possible_cpu(cpu) {
+		rq_i = cpu_rq(cpu);
+		raw_spin_lock(&rq_i->grr.mask_lock);
+	}
+}
+
+inline void unlock_grr_masks(void)
+{
+	struct rq *rq_i;
+	int cpu;
+	for_each_possible_cpu(cpu) {
+		rq_i = cpu_rq(cpu);
+		raw_spin_unlock(&rq_i->grr.mask_lock);
+	}
+}
+
 static int do_sched_assign_ncores_to_group(int ncores, int group)
 {
 	if (!capable(CAP_SYS_ADMIN))
@@ -10755,23 +10775,72 @@ static int do_sched_assign_ncores_to_group(int ncores, int group)
 	if (group != GRR_DEFAULT && group != GRR_PERFORMANCE)
 		return -EINVAL;
 
-	if (ncores > nr_cpu_ids)
+	if (ncores >= nr_cpu_ids || ncores <= 0)
 		return -EINVAL;
 
-// Get the locks
-// Check masks
+	// Block group related operations
+	raw_spin_lock(&bl_d);
+	raw_spin_lock(&bl_p);
+	lock_grr_masks();
 
+	int return_value = 0;
+	int add_to_group, nr_to_move;
+	cpumask_t *group_mask, *other_mask;
+	struct rq *src_rq, *dest_rq;
+	int src_cpu, dest_cpu, migration_group;
+// Check masks
+	group_mask = group - 1 ? &cp_p : &cp_d;
+
+	nr_to_move = cpumask_weight(group_mask);
+
+	if (nr_to_move == ncores)
+		goto unlock;
+
+	add_to_group = ncores > nr_to_move;
+	nr_to_move = add_to_group ? ncores - nr_to_move : nr_to_move - ncores;
+
+	// The group the migrating tasks belong to
+	migration_group = add_to_group ^ (group - 1);
+	group_mask = migration_group ? &cp_p : &cp_d;
+	other_mask = migration_group ? &cp_d : &cp_p; // Inverse of group_mask
 // Repeat for however many cores need to be switched
+	for (int i = 0; i < nr_to_move; ++i) {
+		src_cpu = find_idlest_cpu(group_mask);
+		// Updating masks
+		cpumask_clear_cpu(src_cpu, group_mask);
+		cpumask_set_cpu(src_cpu, other_mask);
+
+		dest_cpu = find_idlest_cpu(group_mask);
+		pr_info("GRR | Group mask: %*pbl, Other mask: %*pbl. Src cpu: %d, dest cpu: %d\n", cpumask_pr_args(group_mask), cpumask_pr_args(other_mask), src_cpu, dest_cpu);
+
+		src_rq = cpu_rq(src_cpu);
+		dest_rq = cpu_rq(dest_cpu);
+		double_raw_lock(&src_rq->__lock, &dest_rq->__lock);
+
+		migrate_all_grr_tasks(src_rq, dest_rq, migration_group);
+
+		double_raw_unlock(&src_rq->__lock, &dest_rq->__lock);
+	}
 // -Find idlest cpu from the oposite group
 // -Migrate all tasks from it to another from the other class (preferably idlest
 // through load ballancer will handle that)
 // Dont forget to change the masks
 // Unlock
 
-//unclock:
-		return 0;
+unlock:
+	if (group - 1) {
+		raw_spin_unlock(&bl_d);
+		raw_spin_unlock(&bl_p);
+	} else {
+		raw_spin_unlock(&bl_p);
+		raw_spin_unlock(&bl_d);
+	}
+	unlock_grr_masks();
+	return return_value;
 
 }
+
+#ifdef CONFIG_SMP
 
 static int do_sched_assign_process_to_group(pid_t pid, int group)
 {
@@ -10838,7 +10907,7 @@ static int do_sched_assign_process_to_group(pid_t pid, int group)
 
 		double_raw_lock(&task_rq->__lock, &idlest_rq->__lock);
 
-		migrate_grr_task(current_task, task_rq, idlest_rq, idlest_cpu);
+		migrate_grr_task(current_task, task_rq, idlest_rq);
 
 		double_raw_unlock(&task_rq->__lock, &idlest_rq->__lock);
 	}
@@ -10848,6 +10917,57 @@ unlock:
 	read_unlock(&tasklist_lock);
 	return return_value;
 }
+
+#else
+
+static int do_sched_assign_process_to_group(pid_t pid, int group)
+{
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if (group != GRR_DEFAULT && group != GRR_PERFORMANCE)
+		return -EINVAL;
+
+	//Check if task with the given pid exists
+	struct pid *p;
+	struct task_struct *task;
+	struct rq *cpu_rq;
+	int return_value;
+
+	cpu_rq = this_rq();
+
+	read_lock(&tasklist_lock);
+
+	p = find_get_pid(pid);
+	if (!p)
+		return -EINVAL;
+
+	task = get_pid_task(p, PIDTYPE_PID);
+	put_pid(p);
+
+	if (task->sched_class != &grr_sched_class)
+		return -EINVAL;
+
+	if (task->grr.prio == group - 1)
+		return 0;
+
+	struct task_struct *current_task;
+	int idlest_cpu, cpu;
+	struct rq *task_rq, *idlest_rq;
+
+	for_each_thread(task, current_task) {
+		current_task->grr.prio = group - 1;
+		if (task->grr.on_rq == 0)
+			continue;
+
+		dequeue_task_grr(cpu_rq, current_task, 0);
+		enqueue(cpu_rq, current_task, 0);
+	}
+
+	return 0;
+}
+
+#endif
 
 SYSCALL_DEFINE2(sched_assign_ncores_to_group, int, ncores, int, group)
 {
