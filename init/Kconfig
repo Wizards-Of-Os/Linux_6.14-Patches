@@ -5,6 +5,9 @@ config GRR_SCHED
 	This option enables the Group Round-Robin Scheduling class,
 	and makes it the default scheduler for the system.
 
+		This scheduler is automatically configured to replace the default
+		scheduler of the system.
+
 config CC_VERSION_TEXT
 	string
 	default "$(CC_VERSION_TEXT)"

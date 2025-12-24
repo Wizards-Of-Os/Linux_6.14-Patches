@@ -594,7 +594,7 @@ struct sched_entity {
 
 #ifdef CONFIG_GRR_SCHED
 struct sched_grr_entity {
-	struct list_head 		run_list;
+	struct list_head		run_list;
 	unsigned int			time_slice;
 	unsigned short			on_rq;
 	short int				prio;

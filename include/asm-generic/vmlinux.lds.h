@@ -135,8 +135,8 @@ defined(CONFIG_AUTOFDO_CLANG) || defined(CONFIG_PROPELLER_CLANG)
  */
 
 #ifdef CONFIG_GRR_SCHED
-	#define GRR_SCHED_DATA *(__grr_sched_class)	
-#else 
+	#define GRR_SCHED_DATA *(__grr_sched_class)
+#else
 	#define GRR_SCHED_DATA
 #endif
 

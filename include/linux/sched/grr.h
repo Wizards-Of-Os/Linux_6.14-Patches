@@ -1,10 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef H_GRR
 #define H_GRR
 
 #include <linux/sched.h>
 
-#define GRR_DEFAULT 1 
-#define GRR_PERFORMANCE 2 
+#define GRR_DEFAULT 1
+#define GRR_PERFORMANCE 2
 
 // Used to ensure a startavtion free scheduling in the case where a core shares
 // both performance and default tasks.
@@ -19,12 +20,13 @@
 extern cpumask_t cp_d;
 extern cpumask_t cp_p;
 
-int find_idlest_cpu(cpumask_t * );
-int find_busiest_cpu(cpumask_t * );
-void load_balance_grr(struct rq *);
-void migrate_grr_task(struct task_struct * , struct rq* , struct rq*  , int);
+int find_idlest_cpu(cpumask_t *group_mask);
+int find_busiest_cpu(cpumask_t *group_mask);
+void load_balance_grr(struct rq *this_rq);
+void migrate_grr_task(struct task_struct *current_task, struct rq *task_rq,
+	struct rq *idlest_rq, int idlest_cpu);
 
-#define LB_TIMESLICE 500 * HZ / 1000
+#define LB_TIMESLICE (500 * HZ / 1000)
 
 #endif
 

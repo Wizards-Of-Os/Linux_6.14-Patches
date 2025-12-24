@@ -4515,10 +4515,10 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->rt.on_list		= 0;
 
 #ifdef CONFIG_GRR_SCHED
-    INIT_LIST_HEAD(&p->grr.run_list);
-    p->grr.time_slice = RR_TIMESLICE;
-    p->grr.on_rq = 0 ; 
-    p->grr.prio = current->grr.prio;
+	INIT_LIST_HEAD(&p->grr.run_list);
+	p->grr.time_slice = RR_TIMESLICE;
+	p->grr.on_rq = 0;
+	p->grr.prio = current->grr.prio;
 #endif
 
 #ifdef CONFIG_SCHED_CLASS_EXT
@@ -4773,7 +4773,7 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 		 * fulfilled its duty:
 		 */
 		p->sched_reset_on_fork = 0;
-	}	
+	}
 
 	if (dl_prio(p->prio))
 		return -EAGAIN;
@@ -4783,12 +4783,12 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 
 	if (rt_prio(p->prio)) {
 		p->sched_class = &rt_sched_class;
-	
+
 #ifdef CONFIG_GRR_SCHED
 
-	}else if(p->policy == SCHED_GRR){
+	} else if (p->policy == SCHED_GRR) {
 		p->sched_class = &grr_sched_class;
-		
+
 #endif
 #ifdef CONFIG_SCHED_CLASS_EXT
 	} else if (task_should_scx(p->policy)) {
@@ -5716,7 +5716,7 @@ void sched_tick(void)
 	#ifdef CONFIG_GRR_SCHED
 		load_balance_grr(rq);
 	#endif
-	
+
 #endif
 }
 
@@ -7141,7 +7141,7 @@ EXPORT_SYMBOL(default_wake_function);
 const struct sched_class *__setscheduler_class(int policy, int prio)
 {
 #ifdef CONFIG_GRR_SCHED
-	if(policy == SCHED_GRR)
+	if (policy == SCHED_GRR)
 		return &grr_sched_class;
 #endif
 	if (dl_prio(prio))
@@ -8478,7 +8478,7 @@ void __init sched_init_smp(void)
 
 	init_sched_rt_class();
 	init_sched_dl_class();
-#ifdef CONFIG_GRR_SCHED  
+#ifdef CONFIG_GRR_SCHED
 	init_sched_grr_class();
 #endif
 
@@ -8528,12 +8528,7 @@ void __init sched_init(void)
 	BUG_ON(!sched_class_above(&stop_sched_class, &dl_sched_class));
 #endif
 	BUG_ON(!sched_class_above(&dl_sched_class, &rt_sched_class));
-#ifndef CONFIG_GRR_SCHED
 	BUG_ON(!sched_class_above(&rt_sched_class, &fair_sched_class));
-#else
-	BUG_ON(!sched_class_above(&rt_sched_class, &grr_sched_class));
-	BUG_ON(!sched_class_above(&grr_sched_class, &fair_sched_class));	
-#endif
 	BUG_ON(!sched_class_above(&fair_sched_class, &idle_sched_class));
 #ifdef CONFIG_SCHED_CLASS_EXT
 	BUG_ON(!sched_class_above(&fair_sched_class, &ext_sched_class));
@@ -10750,106 +10745,118 @@ void sched_enq_and_set_task(struct sched_enq_and_set_ctx *ctx)
 }
 #endif	/* CONFIG_SCHED_CLASS_EXT */
 
-#ifdef CONFIG_GRR_SCHED 
+#ifdef CONFIG_GRR_SCHED
 
 static int do_sched_assign_ncores_to_group(int ncores, int group)
 {
-	if (!capable(CAP_SYS_ADMIN)) {
-        return -EPERM;
-    }
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
-	return 0;
+	if (group != GRR_DEFAULT && group != GRR_PERFORMANCE)
+		return -EINVAL;
+
+	if (ncores > nr_cpu_ids)
+		return -EINVAL;
+
+// Get the locks
+// Check masks
+
+// Repeat for however many cores need to be switched
+// -Find idlest cpu from the oposite group
+// -Migrate all tasks from it to another from the other class (preferably idlest
+// through load ballancer will handle that)
+// Dont forget to change the masks
+// Unlock
+
+//unclock:
+		return 0;
 
 }
 
 static int do_sched_assign_process_to_group(pid_t pid, int group)
 {
-	if (!capable(CAP_SYS_ADMIN)) {
-        return -EPERM;
-    }
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
-	if (group != GRR_DEFAULT && group != GRR_PERFORMANCE) {
+	if (group != GRR_DEFAULT && group != GRR_PERFORMANCE)
 		return -EINVAL;
-	}
 
 	//Check if task with the given pid exists
 	struct pid *p;
 	struct task_struct *task;
+	struct rq *cpu_rq;
 	int return_value;
+
+	cpu_rq = this_rq();
+	raw_spin_lock(&cpu_rq->grr.mask_lock);
 
 	read_lock(&tasklist_lock);
 
 	p = find_get_pid(pid);
 	if (!p) {
-    	return_value = -EINVAL;
+		return_value = -EINVAL;
 		goto unlock;
 	}
 
 	task = get_pid_task(p, PIDTYPE_PID);
 	put_pid(p);
 
-	if(task->sched_class != &grr_sched_class) { 
+	if (task->sched_class != &grr_sched_class) {
 		return_value = -EINVAL;
 		goto unlock;
 	}
 
-	if (task->grr.on_rq == 0){
-		task->grr.prio = group-1 ; 
+	if (task->grr.prio == group - 1) {
 		return_value = 0;
 		goto unlock;
 	}
 
-	if (task->grr.prio == group-1 ){
-		return_value = 0;
-		goto unlock;
-	}
+	struct task_struct *current_task;
+	struct cpumask *group_mask, *temp_mask;
+	int idlest_cpu, cpu;
+	struct rq *task_rq, *idlest_rq;
 
-	struct task_struct * current_task ; 
-	struct cpumask *group_mask , *temp_mask ; 
-	int idlest_cpu  , cpu; 
-	struct rq *task_rq, *idlest_rq , * cpu_rq ;
-
-	cpu_rq = this_rq();
 	temp_mask = &cpu_rq->grr.temp_mask;
 
-	group_mask = group -1 ? &cp_p : &cp_d;
-	
-	for_each_thread(task,current_task){
+	group_mask = group - 1 ? &cp_p : &cp_d;
+
+	for_each_thread(task, current_task) {
 		cpumask_and(temp_mask, group_mask, current_task->cpus_ptr);
-		if (!cpumask_empty(temp_mask)) {
-			current_task->grr.prio = group -1 ;
-			idlest_cpu = find_idlest_cpu(temp_mask);
-			cpu = task_cpu(current_task);
-
-			idlest_rq = cpu_rq(idlest_cpu);
-			task_rq = cpu_rq(cpu);
-
-			double_raw_lock(&task_rq->__lock , &idlest_rq->__lock);
-
-			migrate_grr_task(current_task , task_rq , idlest_rq , idlest_cpu);
-
-			double_raw_unlock(&task_rq->__lock , &idlest_rq->__lock);
+		if (cpumask_empty(temp_mask)) {
+			return_value = -EINVAL;
+			goto unlock;
 		}
-		else{
-			read_unlock(&tasklist_lock);
-			return -EINVAL;
-		}
+		current_task->grr.prio = group - 1;
+		if (task->grr.on_rq == 0)
+			continue;
+
+		idlest_cpu = find_idlest_cpu(temp_mask);
+		cpu = task_cpu(current_task);
+
+		idlest_rq = cpu_rq(idlest_cpu);
+		task_rq = cpu_rq(cpu);
+
+		double_raw_lock(&task_rq->__lock, &idlest_rq->__lock);
+
+		migrate_grr_task(current_task, task_rq, idlest_rq, idlest_cpu);
+
+		double_raw_unlock(&task_rq->__lock, &idlest_rq->__lock);
 	}
 
 unlock:
+	raw_spin_unlock(&cpu_rq->grr.mask_lock);
 	read_unlock(&tasklist_lock);
-	return return_value; 
-}	
-
-SYSCALL_DEFINE2(sched_assign_ncores_to_group, int , ncores, int , group)
-{
-    return do_sched_assign_ncores_to_group(ncores, group);
+	return return_value;
 }
 
-SYSCALL_DEFINE2(sched_assign_process_to_group, pid_t , pid, int , group)
+SYSCALL_DEFINE2(sched_assign_ncores_to_group, int, ncores, int, group)
 {
-    return do_sched_assign_process_to_group(pid, group);
+	return do_sched_assign_ncores_to_group(ncores, group);
+}
+
+SYSCALL_DEFINE2(sched_assign_process_to_group, pid_t, pid, int, group)
+{
+	return do_sched_assign_process_to_group(pid, group);
 }
 
 #endif
-
