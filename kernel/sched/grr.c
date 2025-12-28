@@ -237,7 +237,6 @@ void load_balance_grr(struct rq *this_rq)
 	this_rq->grr.lb_timeslice = LB_TIMESLICE;
 
 	raw_spin_lock(&this_rq->grr.balance_lock);
-
 	cpu =  smp_processor_id();
 	if (cpumask_test_cpu(cpu, &cp_d)) {
 		group_mask = &cp_d;
@@ -269,7 +268,7 @@ void load_balance_grr(struct rq *this_rq)
 	struct list_head *iterator = grr->group + cpu_group;
 	struct task_struct *task;
 
-	if (busiest_rq->curr->sched_class == &grr_sched_class)
+	if (busiest_rq->donor->sched_class == &grr_sched_class && busiest_rq->donor->grr.prio == cpu_group)
 		iterator = iterator->next;
 	list_for_each_continue(iterator, grr->group + cpu_group) {
 		task = list_entry(iterator, struct task_struct, grr.run_list);
@@ -292,9 +291,8 @@ void load_balance_grr(struct rq *this_rq)
 	double_raw_lock(&busiest_rq->__lock, &idlest_rq->__lock);
 
 	iterator = grr->group + cpu_group;
-	if (busiest_rq->curr->sched_class == &grr_sched_class)
+	if (busiest_rq->donor->sched_class == &grr_sched_class && busiest_rq->donor->grr.prio == cpu_group)
 		iterator = iterator->next;
-
 	list_for_each_continue(iterator, grr->group + cpu_group) {
 		task = list_entry(iterator, struct task_struct, grr.run_list);
 		if (cpumask_test_cpu(idlest_cpu, task->cpus_ptr)) {

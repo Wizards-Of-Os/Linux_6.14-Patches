@@ -10846,7 +10846,6 @@ static int do_sched_assign_process_to_group(pid_t pid, int group)
 
 	cpu_rq = this_rq();
 	raw_spin_lock(&cpu_rq->grr.mask_lock);
-
 	read_lock(&tasklist_lock);
 
 	p = find_get_pid(pid);
@@ -10872,8 +10871,6 @@ static int do_sched_assign_process_to_group(pid_t pid, int group)
 	struct cpumask *group_mask, *temp_mask;
 	int idlest_cpu, cpu;
 	struct rq *task_rq, *idlest_rq;
-	//unsigned char resched_cpus[nr_cpu_ids - 1];
-	//int resched_count = 0;
 
 	temp_mask = &cpu_rq->grr.temp_mask;
 
