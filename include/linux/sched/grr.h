@@ -24,7 +24,7 @@ int find_idlest_cpu(cpumask_t *group_mask);
 int find_busiest_cpu(cpumask_t *group_mask);
 void load_balance_grr(struct rq *this_rq);
 inline void migrate_grr_task(struct task_struct *current_task, struct rq *task_rq, struct rq *idlest_rq);
-inline int migrate_all_grr_tasks(struct rq *src_rq, struct rq *pref_dest_rq, int group);
+inline void migrate_all_grr_tasks(struct rq *src_rq, struct rq *pref_dest_rq, int group);
 
 #define LB_TIMESLICE (500 * HZ / 1000)
 

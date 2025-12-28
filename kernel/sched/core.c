@@ -10788,7 +10788,6 @@ static int do_sched_assign_ncores_to_group(int ncores, int group)
 	cpumask_t *group_mask, *other_mask;
 	struct rq *src_rq, *dest_rq;
 	int src_cpu, dest_cpu, migration_group;
-	int need_resched;
 // Check masks
 	group_mask = group - 1 ? &cp_p : &cp_d;
 
@@ -10816,11 +10815,9 @@ static int do_sched_assign_ncores_to_group(int ncores, int group)
 		dest_rq = cpu_rq(dest_cpu);
 		double_raw_lock(&src_rq->__lock, &dest_rq->__lock);
 
-		need_resched = migrate_all_grr_tasks(src_rq, dest_rq, migration_group);
+		migrate_all_grr_tasks(src_rq, dest_rq, migration_group);
 
 		double_raw_unlock(&src_rq->__lock, &dest_rq->__lock);
-		if (need_resched)
-			resched_curr(src_rq);
 	}
 // -Find idlest cpu from the oposite group
 // -Migrate all tasks from it to another from the other class (preferably idlest
@@ -10892,19 +10889,20 @@ static int do_sched_assign_process_to_group(pid_t pid, int group)
 		if (!task->grr.on_rq)
 			continue;
 
-		idlest_cpu = find_idlest_cpu(temp_mask);
 		cpu = task_cpu(current_task);
+		task_rq = cpu_rq(cpu);
+		if (current_task == task_rq->donor)
+			continue;
+
+		idlest_cpu = find_idlest_cpu(temp_mask);
 
 		idlest_rq = cpu_rq(idlest_cpu);
-		task_rq = cpu_rq(cpu);
-
+		
 		double_raw_lock(&task_rq->__lock, &idlest_rq->__lock);
 
 		migrate_grr_task(current_task, task_rq, idlest_rq);
-
+		
 		double_raw_unlock(&task_rq->__lock, &idlest_rq->__lock);
-		if (current_task == task_rq->donor)
-			resched_curr(task_rq);
 	}
 
 unlock:
