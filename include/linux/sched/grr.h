@@ -20,21 +20,13 @@
 extern cpumask_t cp_d;
 extern cpumask_t cp_p;
 
-extern raw_spinlock_t bl_d;
-extern raw_spinlock_t bl_p;
-
 int find_idlest_cpu(cpumask_t *group_mask);
 int find_busiest_cpu(cpumask_t *group_mask);
 void load_balance_grr(struct rq *this_rq);
-void migrate_grr_task(struct task_struct *current_task, struct rq *task_rq, struct rq *idlest_rq);
-inline void migrate_all_grr_tasks(struct rq *src_rq, struct rq *pref_dest_rq, int group);
+inline void migrate_grr_task(struct task_struct *current_task, struct rq *task_rq, struct rq *idlest_rq);
+inline int migrate_all_grr_tasks(struct rq *src_rq, struct rq *pref_dest_rq, int group);
 
 #define LB_TIMESLICE (500 * HZ / 1000)
-
-#else
-
-static bool dequeue_task_grr(struct rq *rq, struct task_struct *p, int flags);
-static void enqueue_task_grr(struct rq *rq, struct task_struct *p, int flags);
 
 #endif
 

@@ -8478,7 +8478,7 @@ void __init sched_init_smp(void)
 
 	init_sched_rt_class();
 	init_sched_dl_class();
-#ifdef CONFIG_GRR_SCHED
+#if defined(CONFIG_GRR_SCHED) && defined(CONFIG_SMP)
 	init_sched_grr_class();
 #endif
 
@@ -10739,30 +10739,32 @@ void sched_enq_and_set_task(struct sched_enq_and_set_ctx *ctx)
 	lockdep_assert_rq_held(rq);
 
 	if (ctx->queued)
-		enqueue_task(rq, ctx->p, ctx->queue_flags | ENQUEUE_NOCLOCK);
-	if (ctx->running)
-		set_next_task(rq, ctx->p);
+	enqueue_task(rq, ctx->p, ctx->queue_flags | ENQUEUE_NOCLOCK);
+if (ctx->running)
+set_next_task(rq, ctx->p);
 }
 #endif	/* CONFIG_SCHED_CLASS_EXT */
 
 #ifdef CONFIG_GRR_SCHED
-
-inline void lock_grr_masks(void)
+#ifdef CONFIG_SMP
+inline void lock_grr_locks(void)
 {
 	struct rq *rq_i;
 	int cpu;
 	for_each_possible_cpu(cpu) {
 		rq_i = cpu_rq(cpu);
+		raw_spin_lock(&rq_i->grr.balance_lock);
 		raw_spin_lock(&rq_i->grr.mask_lock);
 	}
 }
 
-inline void unlock_grr_masks(void)
+inline void unlock_grr_locks(void)
 {
 	struct rq *rq_i;
 	int cpu;
 	for_each_possible_cpu(cpu) {
 		rq_i = cpu_rq(cpu);
+		raw_spin_unlock(&rq_i->grr.balance_lock);
 		raw_spin_unlock(&rq_i->grr.mask_lock);
 	}
 }
@@ -10779,15 +10781,14 @@ static int do_sched_assign_ncores_to_group(int ncores, int group)
 		return -EINVAL;
 
 	// Block group related operations
-	raw_spin_lock(&bl_d);
-	raw_spin_lock(&bl_p);
-	lock_grr_masks();
+	lock_grr_locks();
 
 	int return_value = 0;
 	int add_to_group, nr_to_move;
 	cpumask_t *group_mask, *other_mask;
 	struct rq *src_rq, *dest_rq;
 	int src_cpu, dest_cpu, migration_group;
+	int need_resched;
 // Check masks
 	group_mask = group - 1 ? &cp_p : &cp_d;
 
@@ -10811,36 +10812,26 @@ static int do_sched_assign_ncores_to_group(int ncores, int group)
 		cpumask_set_cpu(src_cpu, other_mask);
 
 		dest_cpu = find_idlest_cpu(group_mask);
-		pr_info("GRR | Group mask: %*pbl, Other mask: %*pbl. Src cpu: %d, dest cpu: %d\n", cpumask_pr_args(group_mask), cpumask_pr_args(other_mask), src_cpu, dest_cpu);
-
 		src_rq = cpu_rq(src_cpu);
 		dest_rq = cpu_rq(dest_cpu);
 		double_raw_lock(&src_rq->__lock, &dest_rq->__lock);
 
-		migrate_all_grr_tasks(src_rq, dest_rq, migration_group);
+		need_resched = migrate_all_grr_tasks(src_rq, dest_rq, migration_group);
 
 		double_raw_unlock(&src_rq->__lock, &dest_rq->__lock);
+		if (need_resched)
+			resched_curr(src_rq);
 	}
 // -Find idlest cpu from the oposite group
 // -Migrate all tasks from it to another from the other class (preferably idlest
 // through load ballancer will handle that)
 // Dont forget to change the masks
 // Unlock
-
 unlock:
-	if (group - 1) {
-		raw_spin_unlock(&bl_d);
-		raw_spin_unlock(&bl_p);
-	} else {
-		raw_spin_unlock(&bl_p);
-		raw_spin_unlock(&bl_d);
-	}
-	unlock_grr_masks();
+	unlock_grr_locks();
 	return return_value;
-
 }
 
-#ifdef CONFIG_SMP
 
 static int do_sched_assign_process_to_group(pid_t pid, int group)
 {
@@ -10884,6 +10875,8 @@ static int do_sched_assign_process_to_group(pid_t pid, int group)
 	struct cpumask *group_mask, *temp_mask;
 	int idlest_cpu, cpu;
 	struct rq *task_rq, *idlest_rq;
+	//unsigned char resched_cpus[nr_cpu_ids - 1];
+	//int resched_count = 0;
 
 	temp_mask = &cpu_rq->grr.temp_mask;
 
@@ -10896,7 +10889,7 @@ static int do_sched_assign_process_to_group(pid_t pid, int group)
 			goto unlock;
 		}
 		current_task->grr.prio = group - 1;
-		if (task->grr.on_rq == 0)
+		if (!task->grr.on_rq)
 			continue;
 
 		idlest_cpu = find_idlest_cpu(temp_mask);
@@ -10910,6 +10903,8 @@ static int do_sched_assign_process_to_group(pid_t pid, int group)
 		migrate_grr_task(current_task, task_rq, idlest_rq);
 
 		double_raw_unlock(&task_rq->__lock, &idlest_rq->__lock);
+		if (current_task == task_rq->donor)
+			resched_curr(task_rq);
 	}
 
 unlock:
@@ -10920,8 +10915,15 @@ unlock:
 
 #else
 
+
+static int do_sched_assign_ncores_to_group(int ncores, int group)
+{
+	return 0;
+}
+
 static int do_sched_assign_process_to_group(pid_t pid, int group)
 {
+
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
@@ -10932,39 +10934,44 @@ static int do_sched_assign_process_to_group(pid_t pid, int group)
 	struct pid *p;
 	struct task_struct *task;
 	struct rq *cpu_rq;
-	int return_value;
+	int return_value = 0;
 
 	cpu_rq = this_rq();
 
 	read_lock(&tasklist_lock);
 
 	p = find_get_pid(pid);
-	if (!p)
-		return -EINVAL;
+	if (!p) {
+		return_value = -EINVAL;
+		goto unlock;
+	}
 
 	task = get_pid_task(p, PIDTYPE_PID);
 	put_pid(p);
 
-	if (task->sched_class != &grr_sched_class)
-		return -EINVAL;
+	if (task->sched_class != &grr_sched_class) {
+		return_value = -EINVAL;
+		goto unlock;
+	}
 
-	if (task->grr.prio == group - 1)
-		return 0;
+	if (task->grr.prio == group - 1) {
+		return_value = 0;
+		goto unlock;
+	}
 
 	struct task_struct *current_task;
-	int idlest_cpu, cpu;
-	struct rq *task_rq, *idlest_rq;
-
+	raw_spin_lock(&cpu_rq->__lock);
 	for_each_thread(task, current_task) {
 		current_task->grr.prio = group - 1;
 		if (task->grr.on_rq == 0)
 			continue;
-
-		dequeue_task_grr(cpu_rq, current_task, 0);
-		enqueue(cpu_rq, current_task, 0);
+		list_move_tail(&task->grr.run_list, cpu_rq->grr.group + group - 1);
 	}
+	raw_spin_unlock(&cpu_rq->__lock);
 
-	return 0;
+unlock:
+	read_unlock(&tasklist_lock);
+	return return_value;
 }
 
 #endif

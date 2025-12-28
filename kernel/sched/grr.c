@@ -34,7 +34,7 @@ void init_grr_rq(struct grr_rq *grr_rq)
 	grr_rq->def_bias = DEF_BIAS;
 #ifdef CONFIG_SMP
 	raw_spin_lock_init(&grr_rq->mask_lock);
-	//raw_spin_lock_init(&grr_rq->balance_lock);
+	raw_spin_lock_init(&grr_rq->balance_lock);
 	grr_rq->lb_timeslice = LB_TIMESLICE;
 #endif
 }
@@ -49,29 +49,7 @@ static inline struct task_struct *grr_task_of(struct sched_grr_entity *grr_se)
 	return container_of(grr_se, struct task_struct, grr);
 }
 
-inline void migrate_all_grr_tasks(struct rq *src_rq, struct rq *pref_dest_rq, int group)
-{
-	struct task_struct *curr_task;
-	struct rq *dest_rq;
-	struct rq *curr_rq = this_rq();
-	cpumask_t *tmp_mask = &curr_rq->grr.temp_mask;
-	int pref_dest_cpu = pref_dest_rq->cpu;
 
-	struct cpumask *group_mask = group ? &cp_p : &cp_d;
-
-	list_for_each_entry(curr_task, src_rq->grr.group + group, grr.run_list) {
-		cpumask_and(tmp_mask, group_mask, curr_task->cpus_ptr);
-		if(cpumask_empty(tmp_mask))
-			continue;
-
-		if (cpumask_test_cpu(pref_dest_cpu, tmp_mask))
-			dest_rq = pref_dest_rq;
-		else
-			dest_rq = cpu_rq(cpumask_any(tmp_mask));
-
-		migrate_grr_task(curr_task, src_rq, dest_rq);
-	}
-}
 
 static void requeue_task_grr(struct rq *rq, struct task_struct *p)
 {
@@ -121,14 +99,13 @@ static void yield_task_grr(struct rq *rq)
 {
 	struct sched_grr_entity *grr_se = &rq->curr->grr;
 	struct grr_rq *grr_rq = &rq->grr;
-
 	list_move_tail(&grr_se->run_list, grr_rq->group + grr_se->prio);
 }
 
 static struct task_struct *pick_task_grr(struct rq *rq)
 {
 	struct grr_rq *grr_rq = &rq->grr;
-	struct sched_grr_entity *grr_se;
+	struct task_struct *p;
 	int prio = 0;
 
 	if (unlikely(list_empty(grr_rq->group + 1) && list_empty(grr_rq->group)))
@@ -156,8 +133,8 @@ static struct task_struct *pick_task_grr(struct rq *rq)
 task_pick_perf:
 	prio = 1;
 task_pick_def:
-	grr_se = list_first_entry(grr_rq->group + prio, struct sched_grr_entity, run_list);
-	return grr_task_of(grr_se);
+	p = list_first_entry(grr_rq->group + prio, struct task_struct, grr.run_list);
+	return p;
 }
 
 static void put_prev_task_grr(struct rq *rq, struct task_struct *p, struct task_struct *next)
@@ -181,10 +158,11 @@ static void task_tick_grr(struct rq *rq, struct task_struct *p, int queued)
 
 	p->grr.time_slice = RR_TIMESLICE;
 
-	if (grr_se->run_list.prev != grr_se->run_list.next) {
+	if (grr_se->run_list.prev != grr_se->run_list.next ||
+		!list_empty(rq->grr.group + !grr_se->prio)) {
+
 		requeue_task_grr(rq, p);
 		resched_curr(rq);
-		return;
 	}
 
 }
@@ -246,9 +224,10 @@ int find_idlest_cpu(cpumask_t *group_mask)
 void load_balance_grr(struct rq *this_rq)
 {
 	int cpu, busiest_cpu, idlest_cpu;
-	int task_group; // GRR Group of the selected task
 	int cpu_group = 0; // GRR Group that the current cpu belongs to
 	struct rq *busiest_rq, *idlest_rq;
+	raw_spinlock_t *bl_lock;
+	cpumask_t *group_mask;
 
 
 	if (--this_rq->grr.lb_timeslice)
@@ -256,20 +235,20 @@ void load_balance_grr(struct rq *this_rq)
 
 	this_rq->grr.lb_timeslice = LB_TIMESLICE;
 
-	//raw_spin_lock(&this_rq->balance_lock);
+	raw_spin_lock(&this_rq->grr.balance_lock);
 
 	cpu =  smp_processor_id();
-	raw_spin_lock(&bl_d);
 	if (cpumask_test_cpu(cpu, &cp_d)) {
-		busiest_cpu = find_busiest_cpu(&cp_d);
-		idlest_cpu = find_idlest_cpu(&cp_d);
+		group_mask = &cp_d;
+		bl_lock = &bl_d;
 	} else {
-		raw_spin_unlock(&bl_d);
+		group_mask = &cp_p;
+		bl_lock = &bl_p;
 		cpu_group = 1;
-		raw_spin_lock(&bl_p);
-		busiest_cpu = find_busiest_cpu(&cp_p);
-		idlest_cpu = find_idlest_cpu(&cp_p);
 	}
+	raw_spin_lock(bl_lock);
+	busiest_cpu = find_busiest_cpu(group_mask);
+	idlest_cpu = find_idlest_cpu(group_mask);
 	busiest_rq = cpu_rq(busiest_cpu);
 	idlest_rq = cpu_rq(idlest_cpu);
 	if ((busiest_cpu == idlest_cpu) || (busiest_rq->nr_running - idlest_rq->nr_running) <= 1)
@@ -278,15 +257,20 @@ void load_balance_grr(struct rq *this_rq)
 
 	struct grr_rq *grr = &busiest_rq->grr;
 
-	// If the current group is empty, attempt to do foreign balance
-	task_group = list_empty(grr->group + cpu_group) ? !cpu_group : cpu_group;
+	/*
+	 * If the respected group of a cpu has no tasks, we check whether there are tasks
+	 * in the other group. This can happed due to affinity. In that case, we attempt
+	 * to move them into another core, in the same group at the current core
+	 */
+	if (list_empty(grr->group + cpu_group))
+		cpu_group = !cpu_group;
 
-	struct list_head *iterator = grr->group + task_group;
+	struct list_head *iterator = grr->group + cpu_group;
 	struct task_struct *task;
 
 	if (busiest_rq->curr->sched_class == &grr_sched_class)
 		iterator = iterator->next;
-	list_for_each_continue(iterator, grr->group + task_group) {
+	list_for_each_continue(iterator, grr->group + cpu_group) {
 		task = list_entry(iterator, struct task_struct, grr.run_list);
 		if (cpumask_test_cpu(idlest_cpu, task->cpus_ptr)) {
 			migrate_grr_task(task, busiest_rq, idlest_rq);
@@ -296,8 +280,8 @@ void load_balance_grr(struct rq *this_rq)
 
 	double_raw_unlock(&busiest_rq->__lock, &idlest_rq->__lock);
 unlock:
-	cpu_group ? raw_spin_unlock(&bl_p) : raw_spin_unlock(&bl_d);
-	//raw_spin_unlock(&this_rq->balance_lock);
+	raw_spin_unlock(bl_lock);
+	raw_spin_unlock(&this_rq->grr.balance_lock);
 }
 
 
@@ -327,18 +311,44 @@ unlock:
 	return picked;
 }
 
-void migrate_grr_task(struct task_struct *current_task,
+inline void migrate_grr_task(struct task_struct *current_task,
 	struct rq *task_rq, struct rq *idlest_rq)
 {
 	int idlest_cpu = idlest_rq->cpu;
 
-	current_task->on_rq = TASK_ON_RQ_MIGRATING;
-	dequeue_task_grr(task_rq, current_task, 0);
+	deactivate_task(task_rq, current_task, 0);
 	set_task_cpu(current_task, idlest_cpu);
-	enqueue_task_grr(idlest_rq, current_task, 0);
-	current_task->on_rq = TASK_ON_RQ_QUEUED;
+	activate_task(idlest_rq, current_task, 0);
 }
 
+// Returns 1 if the donor is also moved
+inline int migrate_all_grr_tasks(struct rq *src_rq, struct rq *pref_dest_rq, int group)
+{
+	struct task_struct *curr_task;
+	struct rq *dest_rq;
+	struct rq *curr_rq = this_rq();
+	cpumask_t *tmp_mask = &curr_rq->grr.temp_mask;
+	int pref_dest_cpu = pref_dest_rq->cpu;
+	int retval = 0;
+
+	struct cpumask *group_mask = group ? &cp_p : &cp_d;
+
+	list_for_each_entry(curr_task, src_rq->grr.group + group, grr.run_list) {
+		cpumask_and(tmp_mask, group_mask, curr_task->cpus_ptr);
+		if(cpumask_empty(tmp_mask))
+			continue;
+
+		if (cpumask_test_cpu(pref_dest_cpu, tmp_mask))
+			dest_rq = pref_dest_rq;
+		else
+			dest_rq = cpu_rq(cpumask_any(tmp_mask));
+
+		if (curr_task == src_rq->donor)
+			retval = 1;
+		migrate_grr_task(curr_task, src_rq, dest_rq);
+	}
+	return retval;
+}
 
 #endif
 
