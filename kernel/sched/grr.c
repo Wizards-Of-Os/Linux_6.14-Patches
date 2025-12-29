@@ -270,6 +270,7 @@ void load_balance_grr(struct rq *this_rq)
 
 	if (busiest_rq->donor->sched_class == &grr_sched_class && busiest_rq->donor->grr.prio == cpu_group)
 		iterator = iterator->next;
+
 	list_for_each_continue(iterator, grr->group + cpu_group) {
 		task = list_entry(iterator, struct task_struct, grr.run_list);
 		if (cpumask_test_cpu(idlest_cpu, task->cpus_ptr)) {
@@ -345,7 +346,7 @@ inline void migrate_grr_task(struct task_struct *current_task,
 
 inline void migrate_all_grr_tasks(struct rq *src_rq, struct rq *pref_dest_rq, int group)
 {
-	struct task_struct *curr_task;
+	struct task_struct *curr_task , *next;
 	struct rq *dest_rq;
 	struct rq *curr_rq = this_rq();
 	cpumask_t *tmp_mask = &curr_rq->grr.temp_mask;
@@ -353,7 +354,7 @@ inline void migrate_all_grr_tasks(struct rq *src_rq, struct rq *pref_dest_rq, in
 
 	struct cpumask *group_mask = group ? &cp_p : &cp_d;
 
-	list_for_each_entry(curr_task, src_rq->grr.group + group, grr.run_list) {
+	list_for_each_entry_safe(curr_task, next , src_rq->grr.group + group, grr.run_list) {
 
 		if (curr_task == src_rq->donor)
 			continue;

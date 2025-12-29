@@ -10888,8 +10888,10 @@ static int do_sched_assign_process_to_group(pid_t pid, int group)
 
 		cpu = task_cpu(current_task);
 		task_rq = cpu_rq(cpu);
-		if (current_task == task_rq->donor)
+		if (current_task == task_rq->donor){
+			list_move(&current_task->grr.run_list, task_rq->grr.group + group - 1);
 			continue;
+		}
 
 		idlest_cpu = find_idlest_cpu(temp_mask);
 
@@ -10903,8 +10905,8 @@ static int do_sched_assign_process_to_group(pid_t pid, int group)
 	}
 
 unlock:
-	raw_spin_unlock(&cpu_rq->grr.mask_lock);
 	read_unlock(&tasklist_lock);
+	raw_spin_unlock(&cpu_rq->grr.mask_lock);
 	return return_value;
 }
 
