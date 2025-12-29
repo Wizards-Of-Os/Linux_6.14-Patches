@@ -203,7 +203,6 @@ static inline int normal_policy(int policy)
 }
 
 
-//PUCCINI
 #ifdef CONFIG_GRR_SCHED
 static inline int grr_policy(int policy)
 {
@@ -226,7 +225,6 @@ static inline int dl_policy(int policy)
 	return policy == SCHED_DEADLINE;
 }
 
-//PUCCINI 2
 static inline bool valid_policy(int policy)
 {
 	#ifdef CONFIG_GRR_SCHED
@@ -813,7 +811,7 @@ static inline int rt_bandwidth_enabled(void)
 # define HAVE_RT_PUSH_IPI
 #endif
 
-//PUCCINI 4
+
 
 #ifdef CONFIG_GRR_SCHED
 struct grr_rq {

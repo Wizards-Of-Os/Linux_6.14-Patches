@@ -10747,6 +10747,7 @@ void sched_enq_and_set_task(struct sched_enq_and_set_ctx *ctx)
 
 #ifdef CONFIG_GRR_SCHED
 #ifdef CONFIG_SMP
+
 inline void lock_grr_locks(void)
 {
 	struct rq *rq_i;
@@ -10771,6 +10772,13 @@ inline void unlock_grr_locks(void)
 	}
 }
 
+/*
+ * Gets all the per-rq locks, (read more in grr.c)
+ * It then calculates the amount of core that need to be moved, and in which
+ * group it should get assigned.
+ * Then it procceds to migrate the tasks from each such cpu to another one from the same
+ * group as them (ingoring the rq->curr).
+ */
 static int do_sched_assign_ncores_to_group(int ncores, int group)
 {
 	if (!capable(CAP_SYS_ADMIN))
@@ -10790,7 +10798,7 @@ static int do_sched_assign_ncores_to_group(int ncores, int group)
 	cpumask_t *group_mask, *other_mask;
 	struct rq *src_rq, *dest_rq;
 	int src_cpu, dest_cpu, migration_group;
-// Check masks
+
 	group_mask = group - 1 ? &cp_p : &cp_d;
 
 	nr_to_move = cpumask_weight(group_mask);
@@ -10805,15 +10813,15 @@ static int do_sched_assign_ncores_to_group(int ncores, int group)
 	migration_group = add_to_group ^ (group - 1);
 	group_mask = migration_group ? &cp_p : &cp_d;
 	other_mask = migration_group ? &cp_d : &cp_p; // Inverse of group_mask
-// Repeat for however many cores need to be switched
+	// Repeat for however many cores need to be switched
 	for (int i = 0; i < nr_to_move; ++i) {
 		src_cpu = find_idlest_cpu(group_mask);
 		// Updating masks
 		cpumask_clear_cpu(src_cpu, group_mask);
 		cpumask_set_cpu(src_cpu, other_mask);
-
 		dest_cpu = find_idlest_cpu(group_mask);
 		src_rq = cpu_rq(src_cpu);
+
 		dest_rq = cpu_rq(dest_cpu);
 		double_raw_lock(&src_rq->__lock, &dest_rq->__lock);
 
@@ -10821,17 +10829,15 @@ static int do_sched_assign_ncores_to_group(int ncores, int group)
 
 		double_raw_unlock(&src_rq->__lock, &dest_rq->__lock);
 	}
-// -Find idlest cpu from the oposite group
-// -Migrate all tasks from it to another from the other class (preferably idlest
-// through load ballancer will handle that)
-// Dont forget to change the masks
-// Unlock
 unlock:
 	unlock_grr_locks();
 	return return_value;
 }
 
-
+/*
+ * Changes the grr->prio field of the tasks and migrates them if they are already in an rq
+ * If the tasks is the rq->curr, we let it here and the load balancer should move it when we finish
+ */
 static int do_sched_assign_process_to_group(pid_t pid, int group)
 {
 	if (!capable(CAP_SYS_ADMIN))
@@ -10912,14 +10918,18 @@ unlock:
 	return return_value;
 }
 
-#else
+#else /* CONFIG_SMP */
 
-
+// Since this syscall has no meaning in unicore, 0 is returned all the time
 static int do_sched_assign_ncores_to_group(int ncores, int group)
 {
 	return 0;
 }
 
+/*
+ * In unicore, the job is as easy as moving the task to the other group queue
+ * If @PERF_BIAS > @DEF_BIAS, the scheduler will give the performance tasks more cpu time
+ */
 static int do_sched_assign_process_to_group(pid_t pid, int group)
 {
 

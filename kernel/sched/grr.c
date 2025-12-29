@@ -3,12 +3,58 @@
 
 #ifdef CONFIG_SMP
 
+
+
+/*
+ * About the masks and the per-rq locks used
+ *
+ * These masks are used to represent the cpus each group includes.
+ * @cp_d: The cpus belonging to the default group
+ * @cp_p: The cpus belonging to the performance group
+ *
+ * They are used by load_balance_grr, select_task_rq_grr and do_sched_assign_process_to_group
+ * just for reading. They are only mutated in do_sched_assign_ncores_to_group, so we need
+ * to synchronise them.
+ *
+ * 2 per core locks are used, the mask_lock for select_task_rq_grr and
+ * do_sched_assign_process_to_group, and the balance_lock, in load_balance_grr.
+ * These functions need to aquire their respective locks before they start reading from a mask.
+ * That way, select_task_rq_grr does not affect load ballancing, and the per-core key,
+ * means that these functions can run simultaniouly on different cpus.
+ *
+ * When do_sched_assign_ncores_to_group is called, it locks all those locks,
+ * and unlockes them once the masks have been updated corrently. That eliminates the
+ * race conditions regarding the masks
+ *
+ * Last but not least, these functions do a set of operations using the group masks.
+ * The per-rq temp_mask is used to store the results from such operations. They are protected
+ * from the mask_lock, and the balancer does not use the temp_mask.
+ */
+
 cpumask_t cp_d;
 cpumask_t cp_p;
 
+
+
+/*
+ * @bl_d: Lock used when balancing among default cores
+ * @bl_p: Lock used when balancing among performance cores
+ *
+ * These make sure that only 1 balance can occur at a time for a group
+ * Without those, 2 or more simultanious balancing action, could have migrated
+ * excess amount of tasks.
+ */
 raw_spinlock_t bl_d;
 raw_spinlock_t bl_p;
 
+
+
+/*
+ * This is called once in sched_init_smp.
+ * We initialize the global masks and locks here.
+ * This is where the default cpus are initialized to be the first half of the systems cores
+ * and the other half are assigned to the performance.
+ */
 void init_sched_grr_class(void)
 {
 	raw_spin_lock_init(&bl_d);
@@ -23,8 +69,13 @@ void init_sched_grr_class(void)
 	}
 }
 
-#endif
+#endif /* CONFIG_SMP */
 
+
+/*
+ * Initializing both lists and other values
+ * In multicore, we also initialize the per-queue lock
+ */
 void init_grr_rq(struct grr_rq *grr_rq)
 {
 	INIT_LIST_HEAD(grr_rq->group);
@@ -41,16 +92,12 @@ void init_grr_rq(struct grr_rq *grr_rq)
 
 static void update_curr_grr(struct rq *rq)
 {
+	// This was a common function found in other schedulers as well
 	update_curr_common(rq);
 }
 
-static inline struct task_struct *grr_task_of(struct sched_grr_entity *grr_se)
-{
-	return container_of(grr_se, struct task_struct, grr);
-}
 
-
-
+// Moves a task ta the end of its respective queue, based on the grr group it is in
 static void requeue_task_grr(struct rq *rq, struct task_struct *p)
 {
 	struct sched_grr_entity *grr_se = &p->grr;
@@ -77,7 +124,7 @@ static void enqueue_task_grr(struct rq *rq, struct task_struct *p, int flags)
 	list_add_tail(&grr_se->run_list, grr_rq->group + idx);
 	grr_se->on_rq = 1;
 	++grr_rq->grr_nr_running;
-	add_nr_running(rq, 1);
+	add_nr_running(rq, 1); // PUCCINI
 }
 
 static bool dequeue_task_grr(struct rq *rq, struct task_struct *p, int flags)
@@ -89,7 +136,7 @@ static bool dequeue_task_grr(struct rq *rq, struct task_struct *p, int flags)
 		list_del(&p->grr.run_list);
 		p->grr.on_rq = 0;
 		--grr_rq->grr_nr_running;
-		sub_nr_running(rq, 1);
+		sub_nr_running(rq, 1); // PUCCINI
 		return true;
 	}
 	return false;
@@ -103,6 +150,10 @@ static void yield_task_grr(struct rq *rq)
 	list_move_tail(&grr_se->run_list, grr_rq->group + grr_se->prio);
 }
 
+/*
+ * Implemented in a starvation free way, to ensure all tasks in the rq
+ * will eventually be picked. Also see grr.h
+ */
 static struct task_struct *pick_task_grr(struct rq *rq)
 {
 	struct grr_rq *grr_rq = &rq->grr;
@@ -112,19 +163,20 @@ static struct task_struct *pick_task_grr(struct rq *rq)
 	if (unlikely(list_empty(grr_rq->group + 1) && list_empty(grr_rq->group)))
 		return NULL;
 
+	// If any signle list is empty, pick from it
 	if (!list_empty(grr_rq->group + 1) && list_empty(grr_rq->group))
 		goto task_pick_perf;
 
 	if (list_empty(grr_rq->group + 1) && !list_empty(grr_rq->group))
 		goto task_pick_def;
 
-	// Both groups have tasks
+	// Both groups have tasks, checking whether a perf tasks should be picked
 	if (grr_rq->perf_bias) {
 		--grr_rq->perf_bias;
 		goto task_pick_perf;
 	}
 
-	// Is this the last default task to get time?
+	// If this is the last def tasks to get picked, reset the counters
 	if (!--grr_rq->def_bias) {
 		grr_rq->perf_bias = PERF_BIAS;
 		grr_rq->def_bias = DEF_BIAS;
@@ -138,6 +190,8 @@ task_pick_def:
 	return p;
 }
 
+
+// Common functions called from other scheduler classes
 static void put_prev_task_grr(struct rq *rq, struct task_struct *p, struct task_struct *next)
 {
 	update_curr_grr(rq);
@@ -147,6 +201,7 @@ static inline void set_next_task_grr(struct rq *rq, struct task_struct *p, bool 
 {
 	p->se.exec_start = rq_clock_task(rq);
 }
+
 
 
 static void task_tick_grr(struct rq *rq, struct task_struct *p, int queued)
@@ -159,6 +214,7 @@ static void task_tick_grr(struct rq *rq, struct task_struct *p, int queued)
 
 	p->grr.time_slice = RR_TIMESLICE;
 
+	// No need to reschedule if there are no other tasks in any group
 	if (grr_se->run_list.prev != grr_se->run_list.next ||
 		!list_empty(rq->grr.group + !grr_se->prio)) {
 
@@ -185,6 +241,20 @@ static void switched_to_grr(struct rq *rq, struct task_struct *p)
 
 
 #ifdef CONFIG_SMP
+
+/*
+ * find_busiest_cpu and find_idlest_cpu find the busiest and idlest cpus from the ones
+ * one their @group_mask argument.
+ * They use rq->nr_running as a metric.
+ *
+ * Whilst this value is constantly changing, I cannot thing of a spimple way to read all the
+ * values without locking all rqs at the same time.
+ * This is not so serious, since because of added some checks, the worst that can happen is
+ * missing an opportunity for balancing, or not balancing from the *currently*
+ * the actaul busiest to the actual idlest.
+ *
+ * These are benign consequences, and we ddem them far better than blocking all the rqs every 500ms
+ */
 
 int find_busiest_cpu(cpumask_t *group_mask)
 {
@@ -231,7 +301,7 @@ void load_balance_grr(struct rq *this_rq)
 	raw_spinlock_t *bl_lock;
 	cpumask_t *group_mask;
 
-
+	// Do balancing only when 500ms have passed
 	if (--this_rq->grr.lb_timeslice)
 		return;
 
@@ -261,7 +331,8 @@ void load_balance_grr(struct rq *this_rq)
 	/*
 	 * If the respected group of a cpu has no tasks, we check whether there are tasks
 	 * in the other group.
-	 *
+	 * In that case, we later attempt to move that task out of this cpu and into a cpu with in a
+	 * matching group
 	 */
 	if (!list_empty(grr->group + !cpu_group))
 		balance_other = 1;
@@ -283,15 +354,19 @@ void load_balance_grr(struct rq *this_rq)
 
 	double_raw_unlock(&busiest_rq->__lock, &idlest_rq->__lock);
 
+	// There is no task in the other queue
 	if (!balance_other)
 		goto unlock;
 
+	// Doing a similar thing to before, but now the destination os from a different group
 	cpu_group = !cpu_group;
 	group_mask = cpu_group ? &cp_p : &cp_d;
 	idlest_cpu = find_idlest_cpu(group_mask);
 	idlest_rq = cpu_rq(idlest_cpu);
 
 	double_raw_lock(&busiest_rq->__lock, &idlest_rq->__lock);
+
+	// We really want to get rid of those tasks, so we dont check whether the imbalance reverts
 
 	iterator = grr->group + cpu_group;
 	if (busiest_rq->donor->sched_class == &grr_sched_class
@@ -310,7 +385,11 @@ unlock:
 	raw_spin_unlock(&this_rq->grr.balance_lock);
 }
 
-
+/*
+ * The task is inserted into the idlest cpu that belongs to the task's group and
+ * respects its affinity.
+ * If there is no such cpu, we just return one that respects the affinity.
+ */
 static int select_task_rq_grr(struct task_struct *p, int cpu, int flags)
 {
 	struct cpumask *group_mask, *tmp_mask;
@@ -337,6 +416,10 @@ unlock:
 	return picked;
 }
 
+/*
+ * Dequeues the @current_task from the @task_rq and enqueues it in @idlest_rq
+ * It mimics the move_queued_task function in core.c
+ */
 inline void migrate_grr_task(struct task_struct *current_task,
 	struct rq *task_rq, struct rq *idlest_rq)
 {
@@ -347,6 +430,12 @@ inline void migrate_grr_task(struct task_struct *current_task,
 	activate_task(idlest_rq, current_task, 0);
 }
 
+
+/*
+ * Moves all the tasks of the @group from @src_rq to another cpu of the same group
+ * We idealy want the destination cpu to be the idlest, but is the tasks cannot go there, we
+ * simply migrate it to another valid.
+ */
 inline void migrate_all_grr_tasks(struct rq *src_rq, struct rq *pref_dest_rq, int group)
 {
 	struct task_struct *curr_task, *next;
@@ -363,6 +452,7 @@ inline void migrate_all_grr_tasks(struct rq *src_rq, struct rq *pref_dest_rq, in
 			continue;
 		cpumask_and(tmp_mask, group_mask, curr_task->cpus_ptr);
 
+		// Task cannot be migrated
 		if (cpumask_empty(tmp_mask))
 			continue;
 

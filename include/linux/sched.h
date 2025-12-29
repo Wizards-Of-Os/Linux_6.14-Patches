@@ -590,8 +590,6 @@ struct sched_entity {
 #endif
 };
 
-//PUCINI 3
-
 #ifdef CONFIG_GRR_SCHED
 struct sched_grr_entity {
 	struct list_head		run_list;
