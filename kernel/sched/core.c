@@ -10739,9 +10739,9 @@ void sched_enq_and_set_task(struct sched_enq_and_set_ctx *ctx)
 	lockdep_assert_rq_held(rq);
 
 	if (ctx->queued)
-	enqueue_task(rq, ctx->p, ctx->queue_flags | ENQUEUE_NOCLOCK);
-if (ctx->running)
-set_next_task(rq, ctx->p);
+		enqueue_task(rq, ctx->p, ctx->queue_flags | ENQUEUE_NOCLOCK);
+	if (ctx->running)
+		set_next_task(rq, ctx->p);
 }
 #endif	/* CONFIG_SCHED_CLASS_EXT */
 
@@ -10751,6 +10751,7 @@ inline void lock_grr_locks(void)
 {
 	struct rq *rq_i;
 	int cpu;
+
 	for_each_possible_cpu(cpu) {
 		rq_i = cpu_rq(cpu);
 		raw_spin_lock(&rq_i->grr.balance_lock);
@@ -10762,6 +10763,7 @@ inline void unlock_grr_locks(void)
 {
 	struct rq *rq_i;
 	int cpu;
+
 	for_each_possible_cpu(cpu) {
 		rq_i = cpu_rq(cpu);
 		raw_spin_unlock(&rq_i->grr.balance_lock);
@@ -10888,7 +10890,7 @@ static int do_sched_assign_process_to_group(pid_t pid, int group)
 
 		cpu = task_cpu(current_task);
 		task_rq = cpu_rq(cpu);
-		if (current_task == task_rq->donor){
+		if (current_task == task_rq->donor) {
 			list_move(&current_task->grr.run_list, task_rq->grr.group + group - 1);
 			continue;
 		}
@@ -10896,11 +10898,11 @@ static int do_sched_assign_process_to_group(pid_t pid, int group)
 		idlest_cpu = find_idlest_cpu(temp_mask);
 
 		idlest_rq = cpu_rq(idlest_cpu);
-		
+
 		double_raw_lock(&task_rq->__lock, &idlest_rq->__lock);
 
 		migrate_grr_task(current_task, task_rq, idlest_rq);
-		
+
 		double_raw_unlock(&task_rq->__lock, &idlest_rq->__lock);
 	}
 
@@ -10957,6 +10959,7 @@ static int do_sched_assign_process_to_group(pid_t pid, int group)
 	}
 
 	struct task_struct *current_task;
+
 	raw_spin_lock(&cpu_rq->__lock);
 	for_each_thread(task, current_task) {
 		current_task->grr.prio = group - 1;

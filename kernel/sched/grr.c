@@ -99,6 +99,7 @@ static void yield_task_grr(struct rq *rq)
 {
 	struct sched_grr_entity *grr_se = &rq->curr->grr;
 	struct grr_rq *grr_rq = &rq->grr;
+
 	list_move_tail(&grr_se->run_list, grr_rq->group + grr_se->prio);
 }
 
@@ -259,8 +260,8 @@ void load_balance_grr(struct rq *this_rq)
 
 	/*
 	 * If the respected group of a cpu has no tasks, we check whether there are tasks
-	 * in the other group. 
-	 * 
+	 * in the other group.
+	 *
 	 */
 	if (!list_empty(grr->group + !cpu_group))
 		balance_other = 1;
@@ -268,7 +269,8 @@ void load_balance_grr(struct rq *this_rq)
 	struct list_head *iterator = grr->group + cpu_group;
 	struct task_struct *task;
 
-	if (busiest_rq->donor->sched_class == &grr_sched_class && busiest_rq->donor->grr.prio == cpu_group)
+	if (busiest_rq->donor->sched_class == &grr_sched_class
+		&& busiest_rq->donor->grr.prio == cpu_group)
 		iterator = iterator->next;
 
 	list_for_each_continue(iterator, grr->group + cpu_group) {
@@ -292,7 +294,8 @@ void load_balance_grr(struct rq *this_rq)
 	double_raw_lock(&busiest_rq->__lock, &idlest_rq->__lock);
 
 	iterator = grr->group + cpu_group;
-	if (busiest_rq->donor->sched_class == &grr_sched_class && busiest_rq->donor->grr.prio == cpu_group)
+	if (busiest_rq->donor->sched_class == &grr_sched_class
+		&& busiest_rq->donor->grr.prio == cpu_group)
 		iterator = iterator->next;
 	list_for_each_continue(iterator, grr->group + cpu_group) {
 		task = list_entry(iterator, struct task_struct, grr.run_list);
@@ -346,7 +349,7 @@ inline void migrate_grr_task(struct task_struct *current_task,
 
 inline void migrate_all_grr_tasks(struct rq *src_rq, struct rq *pref_dest_rq, int group)
 {
-	struct task_struct *curr_task , *next;
+	struct task_struct *curr_task, *next;
 	struct rq *dest_rq;
 	struct rq *curr_rq = this_rq();
 	cpumask_t *tmp_mask = &curr_rq->grr.temp_mask;
@@ -354,7 +357,7 @@ inline void migrate_all_grr_tasks(struct rq *src_rq, struct rq *pref_dest_rq, in
 
 	struct cpumask *group_mask = group ? &cp_p : &cp_d;
 
-	list_for_each_entry_safe(curr_task, next , src_rq->grr.group + group, grr.run_list) {
+	list_for_each_entry_safe(curr_task, next, src_rq->grr.group + group, grr.run_list) {
 
 		if (curr_task == src_rq->donor)
 			continue;
