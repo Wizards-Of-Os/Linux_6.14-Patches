@@ -68,8 +68,13 @@ static int ept_open(struct inode *inode, struct file *file)
 static int ept_mmap(struct file *file, struct vm_area_struct *vma)
 {
     vma->vm_ops = &ept_vm_ops;
-    /* VM_PFNMAP για να δουλέψει η vmf_insert_pfn */
-    vm_flags_set(vma, VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
+    
+    /* * ΑΛΛΑΓΗ: Χρησιμοποιούμε VM_MIXEDMAP.
+     * Το VM_PFNMAP προκαλεί loop όταν το PFN δείχνει σε κανονική RAM (backed pages).
+     * Το VM_MIXEDMAP επιτρέπει την εισαγωγή PFNs χωρίς αυτά τα προβλήματα.
+     */
+    vm_flags_set(vma, VM_MIXEDMAP | VM_DONTEXPAND | VM_DONTDUMP);
+    
     return 0;
 }
 

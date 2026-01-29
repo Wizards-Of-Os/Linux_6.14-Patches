@@ -90,6 +90,9 @@
 #include "internal.h"
 #include "swap.h"
 
+void (*ept_invalidate_hook)(struct mm_struct *mm, unsigned long addr) = NULL;
+EXPORT_SYMBOL(ept_invalidate_hook);
+
 #if defined(LAST_CPUPID_NOT_IN_PAGE_FLAGS) && !defined(CONFIG_COMPILE_TEST)
 #warning Unfortunate NUMA and NUMA Balancing config, growing page-frame for last_cpupid.
 #endif
@@ -415,44 +418,41 @@ void free_pgtables(struct mmu_gather *tlb, struct ma_state *mas,
 	} while (vma);
 }
 
-void pmd_install(struct mm_struct *mm, pmd_t *pmd, pgtable_t *pte)
+void pmd_install(struct mm_struct *mm, pmd_t *pmd, pgtable_t *pte, unsigned long address)
 {
 	spinlock_t *ptl = pmd_lock(mm, pmd);
+	bool installed = false; /* Flag για να ξέρουμε αν πετύχαμε */
 
-	if (likely(pmd_none(*pmd))) {	/* Has another populated it ? */
+	if (likely(pmd_none(*pmd))) {	
 		mm_inc_nr_ptes(mm);
-		/*
-		 * Ensure all pte setup (eg. pte page lock and page clearing) are
-		 * visible before the pte is made visible to other CPUs by being
-		 * put into page tables.
-		 *
-		 * The other side of the story is the pointer chasing in the page
-		 * table walking code (when walking the page table without locking;
-		 * ie. most of the time). Fortunately, these data accesses consist
-		 * of a chain of data-dependent loads, meaning most CPUs (alpha
-		 * being the notable exception) will already guarantee loads are
-		 * seen in-order. See the alpha page table accessors for the
-		 * smp_rmb() barriers in page table walking code.
-		 */
-		smp_wmb(); /* Could be smp_wmb__xxx(before|after)_spin_lock */
+		smp_wmb();
 		pmd_populate(mm, pmd, *pte);
 		*pte = NULL;
+		installed = true; /* Επιτυχία! */
 	}
 	spin_unlock(ptl);
+	
+	/* Κλήση του Hook ΕΞΩ από το spinlock */
+	if (installed && ept_invalidate_hook)
+		ept_invalidate_hook(mm, address);
 }
 
-int __pte_alloc(struct mm_struct *mm, pmd_t *pmd)
+int __pte_alloc(struct mm_struct *mm, pmd_t *pmd, unsigned long address)
 {
 	pgtable_t new = pte_alloc_one(mm);
 	if (!new)
 		return -ENOMEM;
 
-	pmd_install(mm, pmd, &new);
+	/* Καλούμε την pmd_install που διαχειρίζεται τα locks και το hook */
+	pmd_install(mm, pmd, &new, address);
+
+	/* Αν το new δεν είναι NULL, σημαίνει ότι η pmd_install δεν το χρησιμοποίησε 
+	   (άρα κάποιος άλλος πρόλαβε), οπότε το ελευθερώνουμε */
 	if (new)
 		pte_free(mm, new);
+
 	return 0;
 }
-
 int __pte_alloc_kernel(pmd_t *pmd)
 {
 	pte_t *new = pte_alloc_one_kernel(&init_mm);
@@ -2211,7 +2211,7 @@ more:
 
 	/* Allocate the PTE if necessary; takes PMD lock once only. */
 	ret = -ENOMEM;
-	if (pte_alloc(mm, pmd))
+	if (pte_alloc(mm, pmd, addr))
 		goto out;
 
 	while (pages_to_write_in_pmd) {
@@ -4856,7 +4856,7 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 	 * Use pte_alloc() instead of pte_alloc_map(), so that OOM can
 	 * be distinguished from a transient failure of pte_offset_map().
 	 */
-	if (pte_alloc(vma->vm_mm, vmf->pmd))
+	if (pte_alloc(vma->vm_mm, vmf->pmd, addr))
 		return VM_FAULT_OOM;
 
 	/* Use the zero-page for reads */
@@ -5214,8 +5214,8 @@ fallback:
 		}
 
 		if (vmf->prealloc_pte)
-			pmd_install(vma->vm_mm, vmf->pmd, &vmf->prealloc_pte);
-		else if (unlikely(pte_alloc(vma->vm_mm, vmf->pmd)))
+			pmd_install(vma->vm_mm, vmf->pmd, &vmf->prealloc_pte, addr);
+		else if (unlikely(pte_alloc(vma->vm_mm, vmf->pmd, addr)))
 			return VM_FAULT_OOM;
 	}
 

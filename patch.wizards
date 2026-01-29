@@ -1,0 +1,59 @@
+diff --git a/kernel/sched/grr.c b/kernel/sched/grr.c
+index e332ad89b765..ab1b875b1cba 100644
+--- a/kernel/sched/grr.c
++++ b/kernel/sched/grr.c
+@@ -27,11 +27,11 @@ void init_grr_rq(struct grr_rq *grr_rq)
+ {
+ 	INIT_LIST_HEAD(grr_rq->group);
+ 	INIT_LIST_HEAD(grr_rq->group + 1);
+-	grr_rq->grr_nr_running = 0; 
+-	grr_rq->lb_timeslice = LB_TIMESLICE;
++	grr_rq->grr_nr_running = 0;
+ 	#ifdef CONFIG_SMP
+-	cpD = (*)cpumask_of(0);
+-	cpP = (*)cpumask_of(nr_cpu_ids / 2);
++	grr_rq->lb_timeslice = LB_TIMESLICE;
++	cpumask_copy(&cpD, cpumask_of(0));
++	cpumask_copy(&cpP, cpumask_of(nr_cpu_ids / 2));
+ 	for (int i = 1; i < nr_cpu_ids / 2; i ++) {
+ 		cpumask_or(&cpD, cpumask_of(i), cpD);
+ 		cpumask_or(&cpP, cpumask_of(nr_cpu_ids / 2 + i), cpP);
+@@ -129,13 +129,31 @@ static void load_balance_grr(void)
+ 	if (--this_rq->grr.lb_timeslice)
+ 		return;
+ 	this_rq->grr.lb_timeslice = LB_TIMESLICE;
+-
+-	//find_busiest
+-
+-	//find_lowest
+-	
+-	//swap
+-
++	int cpu = this_rq->cpu;
++	for (int i = 0; i < nr_cpu_ids; i++){
++		if (i < nr_cpu_ids / 2){
++			if (!cpumask_and(cpumask_of(cpu), cpD))
++				continue;
++			else
++				//FOR default
++				//find_busiest
++
++				//find_lowest
++				
++				//swap
++		}
++		else{
++			if (!cpumask_and(cpumask_of(cpu), cpP))
++				continue;
++			else
++				//FOR Performance
++				//find_busiest
++
++				//find_lowest
++				
++				//swap
++		}
++	}
+ }
+ 
+ #endif
