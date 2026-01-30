@@ -90,6 +90,7 @@
 #include "internal.h"
 #include "swap.h"
 
+/* Definition of the hook variable */
 void (*ept_invalidate_hook)(struct mm_struct *mm, unsigned long addr) = NULL;
 EXPORT_SYMBOL(ept_invalidate_hook);
 
@@ -418,40 +419,64 @@ void free_pgtables(struct mmu_gather *tlb, struct ma_state *mas,
 	} while (vma);
 }
 
+/*
+ * pmd_install - Install a new page table page into the PMD.
+ *
+ * Modified for EPT Project:
+ * 1. Takes 'address' as an argument to pass to the hook.
+ * 2. Calls ept_invalidate_hook() if the PMD was updated.
+ */
 void pmd_install(struct mm_struct *mm, pmd_t *pmd, pgtable_t *pte, unsigned long address)
 {
-	spinlock_t *ptl = pmd_lock(mm, pmd);
-	bool installed = false; /* Flag για να ξέρουμε αν πετύχαμε */
+    spinlock_t *ptl = pmd_lock(mm, pmd);
 
-	if (likely(pmd_none(*pmd))) {	
-		mm_inc_nr_ptes(mm);
-		smp_wmb();
-		pmd_populate(mm, pmd, *pte);
-		*pte = NULL;
-		installed = true; /* Επιτυχία! */
-	}
-	spin_unlock(ptl);
-	
-	/* Κλήση του Hook ΕΞΩ από το spinlock */
-	if (installed && ept_invalidate_hook)
-		ept_invalidate_hook(mm, address);
+    if (likely(pmd_none(*pmd))) {    
+        mm_inc_nr_ptes(mm);
+        /*
+         * Ensure all pte setup (eg. pte page lock and page clearing) are
+         * visible before the pte is made visible to other CPUs by being
+         * put into page tables.
+         *
+         * The other side of the story is the pointer chasing in the page
+         * table walking code (when walking the page table without locking;
+         * ie. most of the time). Fortunately, these data accesses consist
+         * of a chain of data-dependent loads, meaning most CPUs (alpha
+         * being the notable exception) will already guarantee loads are
+         * seen in-order. See the alpha page table accessors for the
+         * smp_rmb() barriers in page table walking code.
+        */
+        smp_wmb(); /* Could be smp_wmb__xxx(before|after)_spin_lock */
+        
+        /* atomic connection of the new page table */
+        pmd_populate(mm, pmd, *pte);
+        
+        /* * EPT HOOK CALL:
+         * Notify the EPT mechanism that the page table hierarchy 
+         * for 'address' has changed.
+         */
+        if (ept_invalidate_hook)
+            ept_invalidate_hook(mm, address);
+
+        /* Indicate that we used the page (so the caller won't free it) */
+        *pte = NULL;
+    }
+    spin_unlock(ptl);
 }
 
+/*
+ * __pte_alloc - Allocate a new page table page and attempt to install it.
+ */
 int __pte_alloc(struct mm_struct *mm, pmd_t *pmd, unsigned long address)
 {
-	pgtable_t new = pte_alloc_one(mm);
-	if (!new)
-		return -ENOMEM;
+    /* Allocate a new page table page (PTE level) */
+    pgtable_t new = pte_alloc_one(mm);
+    if (!new)
+        return -ENOMEM;
 
-	/* Καλούμε την pmd_install που διαχειρίζεται τα locks και το hook */
-	pmd_install(mm, pmd, &new, address);
-
-	/* Αν το new δεν είναι NULL, σημαίνει ότι η pmd_install δεν το χρησιμοποίησε 
-	   (άρα κάποιος άλλος πρόλαβε), οπότε το ελευθερώνουμε */
+    pmd_install(mm, pmd, &new, address);
 	if (new)
-		pte_free(mm, new);
-
-	return 0;
+        pte_free(mm, new);
+    return 0;
 }
 int __pte_alloc_kernel(pmd_t *pmd)
 {
