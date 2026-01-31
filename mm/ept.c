@@ -13,30 +13,45 @@
 #include <linux/hugetlb.h>
 #include <linux/pfn_t.h>
 
-/* External hook from mm/memory.c */
-extern void (*ept_invalidate_hook)(struct mm_struct *mm, unsigned long addr);
+extern void (*ept_inval_func)(struct mm_struct *mm, unsigned long address);
 
-/* Global variable to store the EPT file mapping for invalidation */
+// Used to store the address space and it is needed by the invalidation function
 static struct address_space *ept_mapping;
 
-/* Invalidation Function called by the kernel hook */
-static void ept_invalidation_func(struct mm_struct *mm, unsigned long addr)
+/*
+ * This function is called from memory.c when a new PTE page is allocated. In that case we need
+ * to invalidate that page from our mapping. That way a page fault will occur when trying to
+ * access these pages, resulting in the device mapping the updated PTE to the address space.
+ */
+static void ept_inval(struct mm_struct *mm, unsigned long address)
 {
-	/* Calculate offset in the EPT file corresponding to the faulting address */
-	/* Logic: (addr / 2MB) * 4KB */
-	loff_t offset = (addr >> PMD_SHIFT) << PAGE_SHIFT;
+	/*
+	 * We need to modify address such that the correct virtual addresses of the device are
+	 * invalidated. We simply need to notice that the address corresponds to a PMD entry
+	 * pointing to a PTE, while we want a PTE entry that points to physical pages.
+	 * So we need to shift the address by (PMD_SHIFT - PAGE_SHIFT)
+	 * The way we do it below, also zeroes any offset.
+	 */
+	loff_t ept_of = (address >> PMD_SHIFT) << PAGE_SHIFT;
 
-	if (ept_mapping) {
-		/* Nuke the user's view so they are forced to refault */
-		unmap_mapping_range(ept_mapping, offset, PAGE_SIZE, 1);
-	}
+	// No need to do anything if no mapping has happended
+	if (ept_mapping)
+		unmap_mapping_range(ept_mapping, ept_of, PAGE_SIZE, 1);
 }
 
-/* --- Page Fault Handler --- */
+/*
+ * The custom fault handler
+ * It walks the page table up to the PMD level. If the translation is not found,
+ * the zero page is mapped.
+ * Then, the physical address of the respective PTE table is mapped to the virtual address page
+ * thay caused the fault. That way, the virual page will map to the PTE page containing the
+ * translations for that virtual page.
+ */
 static vm_fault_t ept_fault(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	struct mm_struct *mm = vma->vm_mm;
+	// The address of the page that caused the fault should be used for the walking
 	unsigned long address = vmf->pgoff << PMD_SHIFT;
 	unsigned long pfn;
 	pgd_t *pgd;
@@ -45,11 +60,12 @@ static vm_fault_t ept_fault(struct vm_fault *vmf)
 	pmd_t *pmd;
 	vm_fault_t ret;
 
-	/* Page Walk */
+	// Page walking
 	pgd = pgd_offset(mm, address);
 	if (pgd_none(*pgd) || pgd_bad(*pgd))
 		goto map_zero;
 
+	// Just returns the pgd if the 5-lvl page table is disabled
 	p4d = p4d_offset(pgd, address);
 	if (p4d_none(*p4d) || p4d_bad(*p4d))
 		goto map_zero;
@@ -62,10 +78,11 @@ static vm_fault_t ept_fault(struct vm_fault *vmf)
 	if (pmd_none(*pmd) || !pmd_present(*pmd))
 		goto map_zero;
 
-	/* Found the Page Table Page */
+	// With this trick we can avoid writing architecture specific code
+	// This works since page numbers do not change between architectures.
 	pfn = page_to_pfn(pmd_page(*pmd));
 
-	/* Using vmf_insert_mixed to safely map RAM pages */
+	// Inserting the pfn into the vma of the device for the respected address
 	ret = vmf_insert_mixed(vma, vmf->address, __pfn_to_pfn_t(pfn, PFN_DEV));
 
 	return ret;
@@ -77,29 +94,35 @@ map_zero:
 	return ret;
 }
 
-static const struct vm_operations_struct ept_vm_ops = {
-	.fault = ept_fault,
-};
 
-/* --- File Operations --- */
 static int ept_open(struct inode *inode, struct file *file)
 {
+	// We just need to check whether the user is root
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
 	return 0;
 }
 
+static const struct vm_operations_struct ept_vm_ops = {
+	.fault = ept_fault,
+};
+
 static int ept_mmap(struct file *file, struct vm_area_struct *vma)
 {
+	// Setting the vma so that it uses our custom handlers
 	vma->vm_ops = &ept_vm_ops;
+
+	// Setting flags to allow vmf insertion via the vmf_insert_mixed function.
 	vm_flags_set(vma, VM_MIXEDMAP | VM_DONTEXPAND | VM_DONTDUMP);
 
-	/* CRITICAL: Save the mapping so the hook can use it later */
+	// This is needed for the invalidation
 	ept_mapping = file->f_mapping;
 
 	return 0;
 }
+
+
 
 static const struct file_operations ept_fops = {
 	.owner = THIS_MODULE,
@@ -113,34 +136,36 @@ static struct miscdevice ept_device = {
 	.fops = &ept_fops,
 };
 
-/* --- Init / Exit --- */
+
+/*
+ * Initializing the device
+ * __init is used by other initializers in more devices, so we included it as well
+ */
 static int __init ept_init(void)
 {
 	int ret;
 
+	// Registering the device
 	ret = misc_register(&ept_device);
-	if (ret) {
-		pr_err("ept: misc_register failed\n");
+	if (ret)
 		return ret;
-	}
 
-	/* Register the hook */
-	ept_invalidate_hook = ept_invalidation_func;
+	// Make sure the custom ept invalidator is  used
+	ept_inval_func = ept_inval;
 
-	pr_info("ept: loaded\n");
 	return 0;
 }
 
 static void __exit ept_exit(void)
 {
-	/* Unregister the hook */
-	ept_invalidate_hook = NULL;
+	// The device invalidation function should no longer be used
+	ept_inval_func = NULL;
 
 	/* Wait for any running hooks to finish to prevent crashes */
 	synchronize_rcu();
 
+	// Unregistering the device
 	misc_deregister(&ept_device);
-	pr_info("ept: unloaded\n");
 }
 
 module_init(ept_init);

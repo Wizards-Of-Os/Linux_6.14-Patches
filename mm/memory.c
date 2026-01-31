@@ -91,8 +91,8 @@
 #include "swap.h"
 
 /* Definition of the hook variable */
-void (*ept_invalidate_hook)(struct mm_struct *mm, unsigned long addr) = NULL;
-EXPORT_SYMBOL(ept_invalidate_hook);
+void (*ept_inval_func)(struct mm_struct *mm, unsigned long addr) = NULL;
+EXPORT_SYMBOL(ept_inval_func);
 
 #if defined(LAST_CPUPID_NOT_IN_PAGE_FLAGS) && !defined(CONFIG_COMPILE_TEST)
 #warning Unfortunate NUMA and NUMA Balancing config, growing page-frame for last_cpupid.
@@ -419,18 +419,11 @@ void free_pgtables(struct mmu_gather *tlb, struct ma_state *mas,
 	} while (vma);
 }
 
-/*
- * pmd_install - Install a new page table page into the PMD.
- *
- * Modified for EPT Project:
- * 1. Takes 'address' as an argument to pass to the hook.
- * 2. Calls ept_invalidate_hook() if the PMD was updated.
- */
 void pmd_install(struct mm_struct *mm, pmd_t *pmd, pgtable_t *pte, unsigned long address)
 {
 	spinlock_t *ptl = pmd_lock(mm, pmd);
 
-	if (likely(pmd_none(*pmd))) {
+	if (likely(pmd_none(*pmd))) { /* Has another populated it ? */
 		mm_inc_nr_ptes(mm);
 		/*
 		 * Ensure all pte setup (eg. pte page lock and page clearing) are
@@ -444,31 +437,22 @@ void pmd_install(struct mm_struct *mm, pmd_t *pmd, pgtable_t *pte, unsigned long
 		 * being the notable exception) will already guarantee loads are
 		 * seen in-order. See the alpha page table accessors for the
 		 * smp_rmb() barriers in page table walking code.
-		*/
+		 */
 		smp_wmb(); /* Could be smp_wmb__xxx(before|after)_spin_lock */
-
-		/* atomic connection of the new page table */
 		pmd_populate(mm, pmd, *pte);
 
-		/* * EPT HOOK CALL:
-		 * Notify the EPT mechanism that the page table hierarchy
-		 * for 'address' has changed.
-		 */
-		if (ept_invalidate_hook)
-			ept_invalidate_hook(mm, address);
+		// Call the ept invalidator, only if the device is registered
+		if (ept_inval_func)
+			ept_inval_func(mm, address);
 
-		/* Indicate that we used the page (so the caller won't free it) */
 		*pte = NULL;
 	}
 	spin_unlock(ptl);
 }
 
-/*
- * __pte_alloc - Allocate a new page table page and attempt to install it.
- */
+// Modified to also pass the faulting address to the pmd_install
 int __pte_alloc(struct mm_struct *mm, pmd_t *pmd, unsigned long address)
 {
-	/* Allocate a new page table page (PTE level) */
 	pgtable_t new = pte_alloc_one(mm);
 	if (!new)
 		return -ENOMEM;
@@ -478,6 +462,7 @@ int __pte_alloc(struct mm_struct *mm, pmd_t *pmd, unsigned long address)
 		pte_free(mm, new);
 	return 0;
 }
+
 int __pte_alloc_kernel(pmd_t *pmd)
 {
 	pte_t *new = pte_alloc_one_kernel(&init_mm);

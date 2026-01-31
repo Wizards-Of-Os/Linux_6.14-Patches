@@ -3066,6 +3066,8 @@ pte_t *pte_offset_map_rw_nolock(struct mm_struct *mm, pmd_t *pmd,
 	pte_unmap(pte);					\
 } while (0)
 
+// Modified these macros to pass the faulting address to __pte_alloc
+
 #define pte_alloc(mm, pmd, address) (unlikely(pmd_none(*(pmd))) && __pte_alloc(mm, pmd, address))
 
 #define pte_alloc_map(mm, pmd, address)			\
