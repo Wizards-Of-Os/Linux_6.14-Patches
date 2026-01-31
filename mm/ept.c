@@ -16,7 +16,7 @@
 extern void (*ept_inval_func)(struct mm_struct *mm, unsigned long address);
 
 // Used to store the address space and it is needed by the invalidation function
-static struct address_space *ept_mapping;
+static struct address_space *ept_file_mapping;
 
 /*
  * This function is called from memory.c when a new PTE page is allocated. In that case we need
@@ -35,8 +35,8 @@ static void ept_inval(struct mm_struct *mm, unsigned long address)
 	loff_t ept_of = (address >> PMD_SHIFT) << PAGE_SHIFT;
 
 	// No need to do anything if no mapping has happended
-	if (ept_mapping)
-		unmap_mapping_range(ept_mapping, ept_of, PAGE_SIZE, 1);
+	if (ept_file_mapping)
+		unmap_mapping_range(ept_file_mapping, ept_of, PAGE_SIZE, 1);
 }
 
 /*
@@ -44,7 +44,7 @@ static void ept_inval(struct mm_struct *mm, unsigned long address)
  * It walks the page table up to the PMD level. If the translation is not found,
  * the zero page is mapped.
  * Then, the physical address of the respective PTE table is mapped to the virtual address page
- * thay caused the fault. That way, the virual page will map to the PTE page containing the
+ * that caused the fault. That way, the virtual page will map to the PTE page containing the
  * translations for that virtual page.
  */
 static vm_fault_t ept_fault(struct vm_fault *vmf)
@@ -79,7 +79,7 @@ static vm_fault_t ept_fault(struct vm_fault *vmf)
 		goto map_zero;
 
 	// With this trick we can avoid writing architecture specific code
-	// This works since page numbers do not change between architectures.
+	// This works since page frame numbers do not change between architectures.
 	pfn = page_to_pfn(pmd_page(*pmd));
 
 	// Inserting the pfn into the vma of the device for the respected address
@@ -117,7 +117,7 @@ static int ept_mmap(struct file *file, struct vm_area_struct *vma)
 	vm_flags_set(vma, VM_MIXEDMAP | VM_DONTEXPAND | VM_DONTDUMP);
 
 	// This is needed for the invalidation
-	ept_mapping = file->f_mapping;
+	ept_file_mapping = file->f_mapping;
 
 	return 0;
 }
