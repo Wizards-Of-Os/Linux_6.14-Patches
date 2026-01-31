@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
-
+/*
+ * =====    The Wizards of Os	  =====
+ *		=====   Abra Kadabra  =====
+ */
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
