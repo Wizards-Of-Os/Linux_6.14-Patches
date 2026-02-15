@@ -1,0 +1,1255 @@
+diff --git a/arch/x86/entry/syscalls/syscall_64.tbl b/arch/x86/entry/syscalls/syscall_64.tbl
+index 5eb708bff1c7..418e3a4f067a 100644
+--- a/arch/x86/entry/syscalls/syscall_64.tbl
++++ b/arch/x86/entry/syscalls/syscall_64.tbl
+@@ -390,6 +390,8 @@
+ 464	common	getxattrat		sys_getxattrat
+ 465	common	listxattrat		sys_listxattrat
+ 466	common	removexattrat		sys_removexattrat
++467	common	sys_sched_assign_ncores_to_group		sys_sched_assign_ncores_to_group
++468	common	sys_sched_assign_process_to_group		sys_sched_assign_process_to_group
+ 
+ #
+ # Due to a historical design error, certain syscalls are numbered differently
+diff --git a/include/asm-generic/vmlinux.lds.h b/include/asm-generic/vmlinux.lds.h
+index 0d5b186abee8..b45482851e90 100644
+--- a/include/asm-generic/vmlinux.lds.h
++++ b/include/asm-generic/vmlinux.lds.h
+@@ -133,17 +133,26 @@ defined(CONFIG_AUTOFDO_CLANG) || defined(CONFIG_PROPELLER_CLANG)
+  * used to determine the order of the priority of each sched class in
+  * relation to each other.
+  */
++
++#ifdef CONFIG_GRR_SCHED
++	#define GRR_SCHED_DATA *(__grr_sched_class)
++#else
++	#define GRR_SCHED_DATA
++#endif
++
+ #define SCHED_DATA				\
+ 	STRUCT_ALIGN();				\
+ 	__sched_class_highest = .;		\
+ 	*(__stop_sched_class)			\
+ 	*(__dl_sched_class)			\
+ 	*(__rt_sched_class)			\
++	GRR_SCHED_DATA				\
+ 	*(__fair_sched_class)			\
+ 	*(__ext_sched_class)			\
+ 	*(__idle_sched_class)			\
+ 	__sched_class_lowest = .;
+ 
++
+ /* The actual configuration determine if the init/exit sections
+  * are handled as text/data or they can be discarded (which
+  * often happens at runtime)
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 9c15365a30c0..d1cd96ab9a66 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -590,6 +590,15 @@ struct sched_entity {
+ #endif
+ };
+ 
++#ifdef CONFIG_GRR_SCHED
++struct sched_grr_entity {
++	struct list_head		run_list;
++	unsigned int			time_slice;
++	unsigned short			on_rq;
++	short int				prio;
++};
++#endif
++
+ struct sched_rt_entity {
+ 	struct list_head		run_list;
+ 	unsigned long			timeout;
+@@ -840,7 +849,9 @@ struct task_struct {
+ 	int				static_prio;
+ 	int				normal_prio;
+ 	unsigned int			rt_priority;
+-
++	#ifdef CONFIG_GRR_SCHED
++	struct sched_grr_entity grr;
++	#endif
+ 	struct sched_entity		se;
+ 	struct sched_rt_entity		rt;
+ 	struct sched_dl_entity		dl;
+diff --git a/include/linux/sched/grr.h b/include/linux/sched/grr.h
+new file mode 100644
+index 000000000000..fe3beacf7d90
+--- /dev/null
++++ b/include/linux/sched/grr.h
+@@ -0,0 +1,40 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef H_GRR
++#define H_GRR
++
++#include <linux/sched.h>
++
++#define GRR_DEFAULT 1
++#define GRR_PERFORMANCE 2
++
++/*
++ * @PREF_BIAS and @DEF_BIAS are used to ensure a starvation freescheduling in
++ * the case where an rq has both performance and default tasks.
++ * These macros ensure that after @PERF_BIAS number of performance tasks have been picked,
++ * @DEF_BIAS number of default tasks will be picked right after.
++ *
++ * For performance tasks to get more cpu time, @PERF_BIAS should be greater than @DEF_BIAS
++ * though, one if free to configure it otherwise.
++ */
++
++#define PERF_BIAS 5
++#define DEF_BIAS 3
++
++#ifdef CONFIG_SMP
++
++// For the masks and lockes used, see comments in grr.c
++extern cpumask_t cp_d;
++extern cpumask_t cp_p;
++
++int find_idlest_cpu(cpumask_t *group_mask);
++int find_busiest_cpu(cpumask_t *group_mask);
++void load_balance_grr(struct rq *this_rq);
++inline void migrate_grr_task(struct task_struct *current_task,
++	struct rq *task_rq, struct rq *idlest_rq);
++inline void migrate_all_grr_tasks(struct rq *src_rq, struct rq *pref_dest_rq, int group);
++
++#define LB_TIMESLICE (500 * HZ / 1000)
++
++#endif
++
++#endif
+diff --git a/include/uapi/linux/sched.h b/include/uapi/linux/sched.h
+index 359a14cc76a4..4b730bf9a54b 100644
+--- a/include/uapi/linux/sched.h
++++ b/include/uapi/linux/sched.h
+@@ -120,6 +120,10 @@ struct clone_args {
+ #define SCHED_DEADLINE		6
+ #define SCHED_EXT		7
+ 
++
++#define SCHED_GRR		8
++
++
+ /* Can be ORed in to make sure the process is reverted back to SCHED_NORMAL on fork */
+ #define SCHED_RESET_ON_FORK     0x40000000
+ 
+diff --git a/init/Kconfig b/init/Kconfig
+index 324c2886b2ea..ad123e6c3f34 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -1,4 +1,13 @@
+ # SPDX-License-Identifier: GPL-2.0-only
++config GRR_SCHED
++	bool "Group Round-Robin Scheduler Class"
++	help
++	This option enables the Group Round-Robin Scheduling class,
++	and makes it the default scheduler for the system.
++
++		This scheduler is automatically configured to replace the default
++		scheduler of the system.
++
+ config CC_VERSION_TEXT
+ 	string
+ 	default "$(CC_VERSION_TEXT)"
+diff --git a/init/init_task.c b/init/init_task.c
+index e557f622bd90..633fa75b2db7 100644
+--- a/init/init_task.c
++++ b/init/init_task.c
+@@ -17,6 +17,7 @@
+ 
+ #include <linux/uaccess.h>
+ 
++
+ static struct signal_struct init_signals = {
+ 	.nr_threads	= 1,
+ 	.thread_head	= LIST_HEAD_INIT(init_task.thread_node),
+@@ -63,6 +64,13 @@ unsigned long init_shadow_call_stack[SCS_SIZE / sizeof(long)] = {
+  * Set up the first task table, touch at your own risk!. Base=0,
+  * limit=0x1fffff (=2MB)
+  */
++
++#ifdef CONFIG_GRR_SCHED
++	#define INIT_SCHED SCHED_GRR
++#else
++	#define INIT_SCHED SCHED_NORMAL
++#endif
++
+ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
+ #ifdef CONFIG_THREAD_INFO_IN_TASK
+ 	.thread_info	= INIT_THREAD_INFO(init_task),
+@@ -75,7 +83,7 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
+ 	.prio		= MAX_PRIO - 20,
+ 	.static_prio	= MAX_PRIO - 20,
+ 	.normal_prio	= MAX_PRIO - 20,
+-	.policy		= SCHED_NORMAL,
++	.policy = INIT_SCHED,
+ 	.cpus_ptr	= &init_task.cpus_mask,
+ 	.user_cpus_ptr	= NULL,
+ 	.cpus_mask	= CPU_MASK_ALL,
+@@ -87,6 +95,13 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
+ 	.restart_block	= {
+ 		.fn = do_no_restart_syscall,
+ 	},
++#ifdef CONFIG_GRR_SCHED
++	.grr = {
++		.run_list = LIST_HEAD_INIT(init_task.grr.run_list),
++		.time_slice = RR_TIMESLICE,
++		.prio = 0,
++	},
++#endif
+ 	.se		= {
+ 		.group_node 	= LIST_HEAD_INIT(init_task.se.group_node),
+ 	},
+diff --git a/kernel/kthread.c b/kernel/kthread.c
+index 5dc5b0d7238e..34de5520d11e 100644
+--- a/kernel/kthread.c
++++ b/kernel/kthread.c
+@@ -438,7 +438,11 @@ static int kthread(void *_create)
+ 	 * The new thread inherited kthreadd's priority and CPU mask. Reset
+ 	 * back to default in case they have been changed.
+ 	 */
++#ifdef CONFIG_GRR_SCHED
++	sched_setscheduler_nocheck(current, SCHED_GRR, &param);
++#else
+ 	sched_setscheduler_nocheck(current, SCHED_NORMAL, &param);
++#endif
+ 
+ 	/* OK, tell user we're spawned, wait for stop or wakeup */
+ 	__set_current_state(TASK_UNINTERRUPTIBLE);
+diff --git a/kernel/sched/build_policy.c b/kernel/sched/build_policy.c
+index fae1f5c921eb..06810d74a577 100644
+--- a/kernel/sched/build_policy.c
++++ b/kernel/sched/build_policy.c
+@@ -49,6 +49,10 @@
+ 
+ #include "idle.c"
+ 
++#ifdef CONFIG_GRR_SCHED
++# include "grr.c"
++#endif
++
+ #include "rt.c"
+ 
+ #ifdef CONFIG_SMP
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 042351c7afce..44c476ae7087 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -7,6 +7,11 @@
+  *  Copyright (C) 1991-2002  Linus Torvalds
+  *  Copyright (C) 1998-2024  Ingo Molnar, Red Hat
+  */
++
++#ifdef CONFIG_GRR_SCHED
++#include <linux/sched/grr.h>
++#endif
++
+ #include <linux/highmem.h>
+ #include <linux/hrtimer_api.h>
+ #include <linux/ktime_api.h>
+@@ -4509,6 +4514,13 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
+ 	p->rt.on_rq		= 0;
+ 	p->rt.on_list		= 0;
+ 
++#ifdef CONFIG_GRR_SCHED
++	INIT_LIST_HEAD(&p->grr.run_list);
++	p->grr.time_slice = RR_TIMESLICE;
++	p->grr.on_rq = 0;
++	p->grr.prio = current->grr.prio;
++#endif
++
+ #ifdef CONFIG_SCHED_CLASS_EXT
+ 	init_scx_entity(&p->scx);
+ #endif
+@@ -4734,11 +4746,21 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
+ 	 * Revert to default priority/policy on fork if requested.
+ 	 */
+ 	if (unlikely(p->sched_reset_on_fork)) {
++	#ifdef CONFIG_GRR_SCHED
++		if (task_has_dl_policy(p) || task_has_rt_policy(p)) {
++			p->policy = SCHED_GRR;
++			p->grr.prio = 0;
++			p->static_prio = NICE_TO_PRIO(0);
++			p->rt_priority = 0;
++		}
++	#else
+ 		if (task_has_dl_policy(p) || task_has_rt_policy(p)) {
+ 			p->policy = SCHED_NORMAL;
+ 			p->static_prio = NICE_TO_PRIO(0);
+ 			p->rt_priority = 0;
+-		} else if (PRIO_TO_NICE(p->static_prio) < 0)
++		}
++	#endif
++		else if (PRIO_TO_NICE(p->static_prio) < 0)
+ 			p->static_prio = NICE_TO_PRIO(0);
+ 
+ 		p->prio = p->normal_prio = p->static_prio;
+@@ -4758,8 +4780,16 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
+ 
+ 	scx_pre_fork(p);
+ 
++
+ 	if (rt_prio(p->prio)) {
+ 		p->sched_class = &rt_sched_class;
++
++#ifdef CONFIG_GRR_SCHED
++
++	} else if (p->policy == SCHED_GRR) {
++		p->sched_class = &grr_sched_class;
++
++#endif
+ #ifdef CONFIG_SCHED_CLASS_EXT
+ 	} else if (task_should_scx(p->policy)) {
+ 		p->sched_class = &ext_sched_class;
+@@ -5677,10 +5707,16 @@ void sched_tick(void)
+ 		wq_worker_tick(donor);
+ 
+ #ifdef CONFIG_SMP
++
+ 	if (!scx_switched_all()) {
+ 		rq->idle_balance = idle_cpu(cpu);
+ 		sched_balance_trigger(rq);
+ 	}
++
++	#ifdef CONFIG_GRR_SCHED
++		load_balance_grr(rq);
++	#endif
++
+ #endif
+ }
+ 
+@@ -6026,6 +6062,7 @@ __pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
+ 	 * higher scheduling class, because otherwise those lose the
+ 	 * opportunity to pull in more work from other CPUs.
+ 	 */
++	#ifndef CONFIG_GRR_SCHED
+ 	if (likely(!sched_class_above(prev->sched_class, &fair_sched_class) &&
+ 		   rq->nr_running == rq->cfs.h_nr_queued)) {
+ 
+@@ -6041,6 +6078,7 @@ __pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
+ 
+ 		return p;
+ 	}
++	#endif
+ 
+ restart:
+ 	prev_balance(rq, prev, rf);
+@@ -7102,6 +7140,10 @@ EXPORT_SYMBOL(default_wake_function);
+ 
+ const struct sched_class *__setscheduler_class(int policy, int prio)
+ {
++#ifdef CONFIG_GRR_SCHED
++	if (policy == SCHED_GRR)
++		return &grr_sched_class;
++#endif
+ 	if (dl_prio(prio))
+ 		return &dl_sched_class;
+ 
+@@ -8436,6 +8478,9 @@ void __init sched_init_smp(void)
+ 
+ 	init_sched_rt_class();
+ 	init_sched_dl_class();
++#if defined(CONFIG_GRR_SCHED) && defined(CONFIG_SMP)
++	init_sched_grr_class();
++#endif
+ 
+ 	sched_smp_initialized = true;
+ }
+@@ -8553,6 +8598,9 @@ void __init sched_init(void)
+ 		init_cfs_rq(&rq->cfs);
+ 		init_rt_rq(&rq->rt);
+ 		init_dl_rq(&rq->dl);
++		#ifdef CONFIG_GRR_SCHED
++			init_grr_rq(&rq->grr);
++		#endif
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+ 		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
+ 		rq->tmp_alone_branch = &rq->leaf_cfs_rq_list;
+@@ -10696,3 +10744,256 @@ void sched_enq_and_set_task(struct sched_enq_and_set_ctx *ctx)
+ 		set_next_task(rq, ctx->p);
+ }
+ #endif	/* CONFIG_SCHED_CLASS_EXT */
++
++#ifdef CONFIG_GRR_SCHED
++#ifdef CONFIG_SMP
++
++inline void lock_grr_locks(void)
++{
++	struct rq *rq_i;
++	int cpu;
++
++	for_each_possible_cpu(cpu) {
++		rq_i = cpu_rq(cpu);
++		raw_spin_lock(&rq_i->grr.balance_lock);
++		raw_spin_lock(&rq_i->grr.mask_lock);
++	}
++}
++
++inline void unlock_grr_locks(void)
++{
++	struct rq *rq_i;
++	int cpu;
++
++	for_each_possible_cpu(cpu) {
++		rq_i = cpu_rq(cpu);
++		raw_spin_unlock(&rq_i->grr.balance_lock);
++		raw_spin_unlock(&rq_i->grr.mask_lock);
++	}
++}
++
++/*
++ * Gets all the per-rq locks, (read more in grr.c)
++ * It then calculates the amount of core that need to be moved, and in which
++ * group it should get assigned.
++ * Then it procceds to migrate the tasks from each such cpu to another one from the same
++ * group as them (ingoring the rq->curr).
++ */
++static int do_sched_assign_ncores_to_group(int ncores, int group)
++{
++	if (!capable(CAP_SYS_ADMIN))
++		return -EPERM;
++
++	if (group != GRR_DEFAULT && group != GRR_PERFORMANCE)
++		return -EINVAL;
++
++	if (ncores >= nr_cpu_ids || ncores <= 0)
++		return -EINVAL;
++
++	// Block group related operations
++	lock_grr_locks();
++
++	int return_value = 0;
++	int add_to_group, nr_to_move;
++	cpumask_t *group_mask, *other_mask;
++	struct rq *src_rq, *dest_rq;
++	int src_cpu, dest_cpu, migration_group;
++
++	group_mask = group - 1 ? &cp_p : &cp_d;
++
++	nr_to_move = cpumask_weight(group_mask);
++
++	if (nr_to_move == ncores)
++		goto unlock;
++
++	add_to_group = ncores > nr_to_move;
++	nr_to_move = add_to_group ? ncores - nr_to_move : nr_to_move - ncores;
++
++	// The group the migrating tasks belong to
++	migration_group = add_to_group ^ (group - 1);
++	group_mask = migration_group ? &cp_p : &cp_d;
++	other_mask = migration_group ? &cp_d : &cp_p; // Inverse of group_mask
++	// Repeat for however many cores need to be switched
++	for (int i = 0; i < nr_to_move; ++i) {
++		src_cpu = find_idlest_cpu(group_mask);
++		// Updating masks
++		cpumask_clear_cpu(src_cpu, group_mask);
++		cpumask_set_cpu(src_cpu, other_mask);
++		dest_cpu = find_idlest_cpu(group_mask);
++		src_rq = cpu_rq(src_cpu);
++
++		dest_rq = cpu_rq(dest_cpu);
++		double_raw_lock(&src_rq->__lock, &dest_rq->__lock);
++
++		migrate_all_grr_tasks(src_rq, dest_rq, migration_group);
++
++		double_raw_unlock(&src_rq->__lock, &dest_rq->__lock);
++	}
++unlock:
++	unlock_grr_locks();
++	return return_value;
++}
++
++/*
++ * Changes the grr->prio field of the tasks and migrates them if they are already in an rq
++ * If the tasks is the rq->curr, we let it here and the load balancer should move it when we finish
++ */
++static int do_sched_assign_process_to_group(pid_t pid, int group)
++{
++	if (!capable(CAP_SYS_ADMIN))
++		return -EPERM;
++
++	if (group != GRR_DEFAULT && group != GRR_PERFORMANCE)
++		return -EINVAL;
++
++	//Check if task with the given pid exists
++	struct pid *p;
++	struct task_struct *task;
++	struct rq *cpu_rq;
++	int return_value;
++
++	cpu_rq = this_rq();
++	raw_spin_lock(&cpu_rq->grr.mask_lock);
++	read_lock(&tasklist_lock);
++
++	p = find_get_pid(pid);
++	if (!p) {
++		return_value = -EINVAL;
++		goto unlock;
++	}
++
++	task = get_pid_task(p, PIDTYPE_PID);
++	put_pid(p);
++
++	if (task->sched_class != &grr_sched_class) {
++		return_value = -EINVAL;
++		goto unlock;
++	}
++
++	if (task->grr.prio == group - 1) {
++		return_value = 0;
++		goto unlock;
++	}
++
++	struct task_struct *current_task;
++	struct cpumask *group_mask, *temp_mask;
++	int idlest_cpu, cpu;
++	struct rq *task_rq, *idlest_rq;
++
++	temp_mask = &cpu_rq->grr.temp_mask;
++
++	group_mask = group - 1 ? &cp_p : &cp_d;
++
++	for_each_thread(task, current_task) {
++		cpumask_and(temp_mask, group_mask, current_task->cpus_ptr);
++		if (cpumask_empty(temp_mask)) {
++			return_value = -EINVAL;
++			goto unlock;
++		}
++		current_task->grr.prio = group - 1;
++		if (!task->grr.on_rq)
++			continue;
++
++		cpu = task_cpu(current_task);
++		task_rq = cpu_rq(cpu);
++		if (current_task == task_rq->donor) {
++			list_move(&current_task->grr.run_list, task_rq->grr.group + group - 1);
++			continue;
++		}
++
++		idlest_cpu = find_idlest_cpu(temp_mask);
++
++		idlest_rq = cpu_rq(idlest_cpu);
++
++		double_raw_lock(&task_rq->__lock, &idlest_rq->__lock);
++
++		migrate_grr_task(current_task, task_rq, idlest_rq);
++
++		double_raw_unlock(&task_rq->__lock, &idlest_rq->__lock);
++	}
++
++unlock:
++	read_unlock(&tasklist_lock);
++	raw_spin_unlock(&cpu_rq->grr.mask_lock);
++	return return_value;
++}
++
++#else /* CONFIG_SMP */
++
++// Since this syscall has no meaning in unicore, 0 is returned all the time
++static int do_sched_assign_ncores_to_group(int ncores, int group)
++{
++	return 0;
++}
++
++/*
++ * In unicore, the job is as easy as moving the task to the other group queue
++ * If @PERF_BIAS > @DEF_BIAS, the scheduler will give the performance tasks more cpu time
++ */
++static int do_sched_assign_process_to_group(pid_t pid, int group)
++{
++
++	if (!capable(CAP_SYS_ADMIN))
++		return -EPERM;
++
++	if (group != GRR_DEFAULT && group != GRR_PERFORMANCE)
++		return -EINVAL;
++
++	//Check if task with the given pid exists
++	struct pid *p;
++	struct task_struct *task;
++	struct rq *cpu_rq;
++	int return_value = 0;
++
++	cpu_rq = this_rq();
++
++	read_lock(&tasklist_lock);
++
++	p = find_get_pid(pid);
++	if (!p) {
++		return_value = -EINVAL;
++		goto unlock;
++	}
++
++	task = get_pid_task(p, PIDTYPE_PID);
++	put_pid(p);
++
++	if (task->sched_class != &grr_sched_class) {
++		return_value = -EINVAL;
++		goto unlock;
++	}
++
++	if (task->grr.prio == group - 1) {
++		return_value = 0;
++		goto unlock;
++	}
++
++	struct task_struct *current_task;
++
++	raw_spin_lock(&cpu_rq->__lock);
++	for_each_thread(task, current_task) {
++		current_task->grr.prio = group - 1;
++		if (task->grr.on_rq == 0)
++			continue;
++		list_move_tail(&task->grr.run_list, cpu_rq->grr.group + group - 1);
++	}
++	raw_spin_unlock(&cpu_rq->__lock);
++
++unlock:
++	read_unlock(&tasklist_lock);
++	return return_value;
++}
++
++#endif
++
++SYSCALL_DEFINE2(sched_assign_ncores_to_group, int, ncores, int, group)
++{
++	return do_sched_assign_ncores_to_group(ncores, group);
++}
++
++SYSCALL_DEFINE2(sched_assign_process_to_group, pid_t, pid, int, group)
++{
++	return do_sched_assign_process_to_group(pid, group);
++}
++
++#endif
+diff --git a/kernel/sched/grr.c b/kernel/sched/grr.c
+new file mode 100644
+index 000000000000..1fec84a764d2
+--- /dev/null
++++ b/kernel/sched/grr.c
+@@ -0,0 +1,497 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <linux/sched/grr.h>
++
++#ifdef CONFIG_SMP
++
++
++
++/*
++ * About the masks and the per-rq locks used
++ *
++ * These masks are used to represent the cpus each group includes.
++ * @cp_d: The cpus belonging to the default group
++ * @cp_p: The cpus belonging to the performance group
++ *
++ * They are used by load_balance_grr, select_task_rq_grr and do_sched_assign_process_to_group
++ * just for reading. They are only mutated in do_sched_assign_ncores_to_group, so we need
++ * to synchronise them.
++ *
++ * 2 per core locks are used, the mask_lock for select_task_rq_grr and
++ * do_sched_assign_process_to_group, and the balance_lock, in load_balance_grr.
++ * These functions need to aquire their respective locks before they start reading from a mask.
++ * That way, select_task_rq_grr does not affect load ballancing, and the per-core key,
++ * means that these functions can run simultaniouly on different cpus.
++ *
++ * When do_sched_assign_ncores_to_group is called, it locks all those locks,
++ * and unlockes them once the masks have been updated corrently. That eliminates the
++ * race conditions regarding the masks
++ *
++ * Last but not least, these functions do a set of operations using the group masks.
++ * The per-rq temp_mask is used to store the results from such operations. They are protected
++ * from the mask_lock, and the balancer does not use the temp_mask.
++ */
++
++cpumask_t cp_d;
++cpumask_t cp_p;
++
++
++
++/*
++ * @bl_d: Lock used when balancing among default cores
++ * @bl_p: Lock used when balancing among performance cores
++ *
++ * These make sure that only 1 balance can occur at a time for a group
++ * Without those, 2 or more simultanious balancing action, could have migrated
++ * excess amount of tasks.
++ */
++raw_spinlock_t bl_d;
++raw_spinlock_t bl_p;
++
++
++
++/*
++ * This is called once in sched_init_smp.
++ * We initialize the global masks and locks here.
++ * This is where the default cpus are initialized to be the first half of the systems cores
++ * and the other half are assigned to the performance.
++ */
++void init_sched_grr_class(void)
++{
++	raw_spin_lock_init(&bl_d);
++	raw_spin_lock_init(&bl_p);
++
++	cpumask_copy(&cp_d, cpumask_of(0));
++	cpumask_copy(&cp_p, cpumask_of(nr_cpu_ids - 1));
++
++	for (int i = 1; i < nr_cpu_ids / 2; i++) {
++		cpumask_or(&cp_d, cpumask_of(i), &cp_d);
++		cpumask_or(&cp_p, cpumask_of(nr_cpu_ids - i - 1), &cp_p);
++	}
++}
++
++#endif /* CONFIG_SMP */
++
++
++/*
++ * Initializing both lists and other values
++ * In multicore, we also initialize the per-queue lock
++ */
++void init_grr_rq(struct grr_rq *grr_rq)
++{
++	INIT_LIST_HEAD(grr_rq->group);
++	INIT_LIST_HEAD(grr_rq->group + 1);
++	grr_rq->grr_nr_running = 0;
++	grr_rq->perf_bias = PERF_BIAS;
++	grr_rq->def_bias = DEF_BIAS;
++#ifdef CONFIG_SMP
++	raw_spin_lock_init(&grr_rq->mask_lock);
++	raw_spin_lock_init(&grr_rq->balance_lock);
++	grr_rq->lb_timeslice = LB_TIMESLICE;
++#endif
++}
++
++static void update_curr_grr(struct rq *rq)
++{
++	// This was a common function found in other schedulers as well
++	update_curr_common(rq);
++}
++
++
++// Moves a task ta the end of its respective queue, based on the grr group it is in
++static void requeue_task_grr(struct rq *rq, struct task_struct *p)
++{
++	struct sched_grr_entity *grr_se = &p->grr;
++	struct grr_rq *grr_rq = &rq->grr;
++	int idx = grr_se->prio;
++
++	list_move_tail(&grr_se->run_list, grr_rq->group + idx);
++}
++
++static void wakeup_preempt_grr(struct rq *rq, struct task_struct *p, int flags)
++{
++
++}
++
++static void enqueue_task_grr(struct rq *rq, struct task_struct *p, int flags)
++{
++	struct sched_grr_entity *grr_se = &p->grr;
++	struct grr_rq *grr_rq = &rq->grr;
++	int idx = grr_se->prio;
++
++	if (idx > 1 || idx < 0)
++		return;
++
++	list_add_tail(&grr_se->run_list, grr_rq->group + idx);
++	grr_se->on_rq = 1;
++	++grr_rq->grr_nr_running;
++	add_nr_running(rq, 1); // PUCCINI
++}
++
++static bool dequeue_task_grr(struct rq *rq, struct task_struct *p, int flags)
++{
++	struct grr_rq *grr_rq = &rq->grr;
++
++	update_curr_grr(rq);
++	if (!list_empty(&p->grr.run_list)) {
++		list_del(&p->grr.run_list);
++		p->grr.on_rq = 0;
++		--grr_rq->grr_nr_running;
++		sub_nr_running(rq, 1); // PUCCINI
++		return true;
++	}
++	return false;
++}
++
++static void yield_task_grr(struct rq *rq)
++{
++	struct sched_grr_entity *grr_se = &rq->curr->grr;
++	struct grr_rq *grr_rq = &rq->grr;
++
++	list_move_tail(&grr_se->run_list, grr_rq->group + grr_se->prio);
++}
++
++/*
++ * Implemented in a starvation free way, to ensure all tasks in the rq
++ * will eventually be picked. Also see grr.h
++ */
++static struct task_struct *pick_task_grr(struct rq *rq)
++{
++	struct grr_rq *grr_rq = &rq->grr;
++	struct task_struct *p;
++	int prio = 0;
++
++	if (unlikely(list_empty(grr_rq->group + 1) && list_empty(grr_rq->group)))
++		return NULL;
++
++	// If any signle list is empty, pick from it
++	if (!list_empty(grr_rq->group + 1) && list_empty(grr_rq->group))
++		goto task_pick_perf;
++
++	if (list_empty(grr_rq->group + 1) && !list_empty(grr_rq->group))
++		goto task_pick_def;
++
++	// Both groups have tasks, checking whether a perf tasks should be picked
++	if (grr_rq->perf_bias) {
++		--grr_rq->perf_bias;
++		goto task_pick_perf;
++	}
++
++	// If this is the last def tasks to get picked, reset the counters
++	if (!--grr_rq->def_bias) {
++		grr_rq->perf_bias = PERF_BIAS;
++		grr_rq->def_bias = DEF_BIAS;
++	}
++	goto task_pick_def;
++
++task_pick_perf:
++	prio = 1;
++task_pick_def:
++	p = list_first_entry(grr_rq->group + prio, struct task_struct, grr.run_list);
++	return p;
++}
++
++
++// Common functions called from other scheduler classes
++static void put_prev_task_grr(struct rq *rq, struct task_struct *p, struct task_struct *next)
++{
++	update_curr_grr(rq);
++}
++
++static inline void set_next_task_grr(struct rq *rq, struct task_struct *p, bool first)
++{
++	p->se.exec_start = rq_clock_task(rq);
++}
++
++
++
++static void task_tick_grr(struct rq *rq, struct task_struct *p, int queued)
++{
++	struct sched_grr_entity *grr_se = &p->grr;
++
++	update_curr_grr(rq);
++	if (--p->grr.time_slice)
++		return;
++
++	p->grr.time_slice = RR_TIMESLICE;
++
++	// No need to reschedule if there are no other tasks in any group
++	if (grr_se->run_list.prev != grr_se->run_list.next ||
++		!list_empty(rq->grr.group + !grr_se->prio)) {
++
++		requeue_task_grr(rq, p);
++		resched_curr(rq);
++	}
++
++}
++
++static unsigned int get_rr_interval_grr(struct rq *rq, struct task_struct *task)
++{
++	return RR_TIMESLICE;
++}
++
++static void prio_changed_grr(struct rq *rq, struct task_struct *p, int oldprio)
++{
++
++}
++
++static void switched_to_grr(struct rq *rq, struct task_struct *p)
++{
++
++}
++
++
++#ifdef CONFIG_SMP
++
++/*
++ * find_busiest_cpu and find_idlest_cpu find the busiest and idlest cpus from the ones
++ * one their @group_mask argument.
++ * They use rq->nr_running as a metric.
++ *
++ * Whilst this value is constantly changing, I cannot thing of a spimple way to read all the
++ * values without locking all rqs at the same time.
++ * This is not so serious, since because of added some checks, the worst that can happen is
++ * missing an opportunity for balancing, or not balancing from the *currently*
++ * the actaul busiest to the actual idlest.
++ *
++ * These are benign consequences, and we ddem them far better than blocking all the rqs every 500ms
++ */
++
++int find_busiest_cpu(cpumask_t *group_mask)
++{
++	int cpu, max = -42, max_cpu = 0;
++	struct rq *rq;
++	int nr_rn;
++	int is_bigger;
++
++	for_each_cpu(cpu, group_mask) {
++		rq = cpu_rq(cpu);
++		nr_rn = rq->nr_running;
++		is_bigger = nr_rn > max;
++		if (is_bigger) {
++			max = rq->nr_running;
++			max_cpu = cpu;
++		}
++	}
++	return max_cpu;
++}
++
++
++int find_idlest_cpu(cpumask_t *group_mask)
++{
++	int cpu, min = INT_MAX, min_cpu = 0;
++	struct rq *rq;
++
++	for_each_cpu(cpu, group_mask) {
++		rq = cpu_rq(cpu);
++		if (rq->nr_running < min) {
++			min = rq->nr_running;
++			min_cpu = cpu;
++		}
++	}
++	return min_cpu;
++}
++
++
++void load_balance_grr(struct rq *this_rq)
++{
++	int cpu, busiest_cpu, idlest_cpu;
++	int cpu_group = 0; // GRR Group that the current cpu belongs to
++	int balance_other = 0;
++	struct rq *busiest_rq, *idlest_rq;
++	raw_spinlock_t *bl_lock;
++	cpumask_t *group_mask;
++
++	// Do balancing only when 500ms have passed
++	if (--this_rq->grr.lb_timeslice)
++		return;
++
++	this_rq->grr.lb_timeslice = LB_TIMESLICE;
++
++	raw_spin_lock(&this_rq->grr.balance_lock);
++	cpu =  smp_processor_id();
++	if (cpumask_test_cpu(cpu, &cp_d)) {
++		group_mask = &cp_d;
++		bl_lock = &bl_d;
++	} else {
++		group_mask = &cp_p;
++		bl_lock = &bl_p;
++		cpu_group = 1;
++	}
++	raw_spin_lock(bl_lock);
++	busiest_cpu = find_busiest_cpu(group_mask);
++	idlest_cpu = find_idlest_cpu(group_mask);
++	busiest_rq = cpu_rq(busiest_cpu);
++	idlest_rq = cpu_rq(idlest_cpu);
++	if ((busiest_cpu == idlest_cpu) || (busiest_rq->nr_running - idlest_rq->nr_running) <= 1)
++		goto unlock;
++	double_raw_lock(&busiest_rq->__lock, &idlest_rq->__lock);
++
++	struct grr_rq *grr = &busiest_rq->grr;
++
++	/*
++	 * If the respected group of a cpu has no tasks, we check whether there are tasks
++	 * in the other group.
++	 * In that case, we later attempt to move that task out of this cpu and into a cpu with in a
++	 * matching group
++	 */
++	if (!list_empty(grr->group + !cpu_group))
++		balance_other = 1;
++
++	struct list_head *iterator = grr->group + cpu_group;
++	struct task_struct *task;
++
++	if (busiest_rq->donor->sched_class == &grr_sched_class
++		&& busiest_rq->donor->grr.prio == cpu_group)
++		iterator = iterator->next;
++
++	list_for_each_continue(iterator, grr->group + cpu_group) {
++		task = list_entry(iterator, struct task_struct, grr.run_list);
++		if (cpumask_test_cpu(idlest_cpu, task->cpus_ptr)) {
++			migrate_grr_task(task, busiest_rq, idlest_rq);
++			break;
++		}
++	}
++
++	double_raw_unlock(&busiest_rq->__lock, &idlest_rq->__lock);
++
++	// There is no task in the other queue
++	if (!balance_other)
++		goto unlock;
++
++	// Doing a similar thing to before, but now the destination os from a different group
++	cpu_group = !cpu_group;
++	group_mask = cpu_group ? &cp_p : &cp_d;
++	idlest_cpu = find_idlest_cpu(group_mask);
++	idlest_rq = cpu_rq(idlest_cpu);
++
++	double_raw_lock(&busiest_rq->__lock, &idlest_rq->__lock);
++
++	// We really want to get rid of those tasks, so we dont check whether the imbalance reverts
++
++	iterator = grr->group + cpu_group;
++	if (busiest_rq->donor->sched_class == &grr_sched_class
++		&& busiest_rq->donor->grr.prio == cpu_group)
++		iterator = iterator->next;
++	list_for_each_continue(iterator, grr->group + cpu_group) {
++		task = list_entry(iterator, struct task_struct, grr.run_list);
++		if (cpumask_test_cpu(idlest_cpu, task->cpus_ptr)) {
++			migrate_grr_task(task, busiest_rq, idlest_rq);
++			break;
++		}
++	}
++	double_raw_unlock(&busiest_rq->__lock, &idlest_rq->__lock);
++unlock:
++	raw_spin_unlock(bl_lock);
++	raw_spin_unlock(&this_rq->grr.balance_lock);
++}
++
++/*
++ * The task is inserted into the idlest cpu that belongs to the task's group and
++ * respects its affinity.
++ * If there is no such cpu, we just return one that respects the affinity.
++ */
++static int select_task_rq_grr(struct task_struct *p, int cpu, int flags)
++{
++	struct cpumask *group_mask, *tmp_mask;
++	struct rq *task_rq;
++	int picked;
++
++	task_rq = this_rq();
++	raw_spin_lock(&task_rq->grr.mask_lock);
++
++	tmp_mask = &task_rq->grr.temp_mask;
++
++	group_mask = p->grr.prio ? &cp_p : &cp_d;
++	cpumask_and(tmp_mask, group_mask, p->cpus_ptr);
++
++	if (cpumask_empty(tmp_mask)) {
++		picked = cpu;
++		goto unlock;
++	}
++
++	picked = find_idlest_cpu(tmp_mask);
++
++unlock:
++	raw_spin_unlock(&task_rq->grr.mask_lock);
++	return picked;
++}
++
++/*
++ * Dequeues the @current_task from the @task_rq and enqueues it in @idlest_rq
++ * It mimics the move_queued_task function in core.c
++ */
++inline void migrate_grr_task(struct task_struct *current_task,
++	struct rq *task_rq, struct rq *idlest_rq)
++{
++	int idlest_cpu = idlest_rq->cpu;
++
++	deactivate_task(task_rq, current_task, 0);
++	set_task_cpu(current_task, idlest_cpu);
++	activate_task(idlest_rq, current_task, 0);
++}
++
++
++/*
++ * Moves all the tasks of the @group from @src_rq to another cpu of the same group
++ * We idealy want the destination cpu to be the idlest, but is the tasks cannot go there, we
++ * simply migrate it to another valid.
++ */
++inline void migrate_all_grr_tasks(struct rq *src_rq, struct rq *pref_dest_rq, int group)
++{
++	struct task_struct *curr_task, *next;
++	struct rq *dest_rq;
++	struct rq *curr_rq = this_rq();
++	cpumask_t *tmp_mask = &curr_rq->grr.temp_mask;
++	int pref_dest_cpu = pref_dest_rq->cpu;
++
++	struct cpumask *group_mask = group ? &cp_p : &cp_d;
++
++	list_for_each_entry_safe(curr_task, next, src_rq->grr.group + group, grr.run_list) {
++
++		if (curr_task == src_rq->donor)
++			continue;
++		cpumask_and(tmp_mask, group_mask, curr_task->cpus_ptr);
++
++		// Task cannot be migrated
++		if (cpumask_empty(tmp_mask))
++			continue;
++
++		if (cpumask_test_cpu(pref_dest_cpu, tmp_mask))
++			dest_rq = pref_dest_rq;
++		else
++			dest_rq = cpu_rq(cpumask_any(tmp_mask));
++
++		migrate_grr_task(curr_task, src_rq, dest_rq);
++	}
++}
++
++#endif
++
++
++DEFINE_SCHED_CLASS(grr) = {
++
++	.enqueue_task		= enqueue_task_grr,
++	.dequeue_task		= dequeue_task_grr,
++	.yield_task		= yield_task_grr,
++
++	.wakeup_preempt		= wakeup_preempt_grr,
++
++	.pick_task		= pick_task_grr,
++	.put_prev_task		= put_prev_task_grr,
++	.set_next_task          = set_next_task_grr,
++
++#ifdef CONFIG_SMP
++	.select_task_rq		= select_task_rq_grr,
++	.set_cpus_allowed       = set_cpus_allowed_common,
++
++#endif
++
++	.task_tick		= task_tick_grr,
++
++	.get_rr_interval	= get_rr_interval_grr,
++
++	.prio_changed		= prio_changed_grr,
++	.switched_to		= switched_to_grr,
++
++	.update_curr		= update_curr_grr,
++};
+diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
+index 023b844159c9..6d0799cf8b31 100644
+--- a/kernel/sched/sched.h
++++ b/kernel/sched/sched.h
+@@ -202,6 +202,14 @@ static inline int normal_policy(int policy)
+ 	return policy == SCHED_NORMAL;
+ }
+ 
++
++#ifdef CONFIG_GRR_SCHED
++static inline int grr_policy(int policy)
++{
++	return policy == SCHED_GRR;
++}
++#endif
++
+ static inline int fair_policy(int policy)
+ {
+ 	return normal_policy(policy) || policy == SCHED_BATCH;
+@@ -219,6 +227,12 @@ static inline int dl_policy(int policy)
+ 
+ static inline bool valid_policy(int policy)
+ {
++	#ifdef CONFIG_GRR_SCHED
++
++	return idle_policy(policy) || fair_policy(policy) ||
++		rt_policy(policy) || dl_policy(policy) || grr_policy(policy);
++	#endif
++
+ 	return idle_policy(policy) || fair_policy(policy) ||
+ 		rt_policy(policy) || dl_policy(policy);
+ }
+@@ -797,6 +811,25 @@ static inline int rt_bandwidth_enabled(void)
+ # define HAVE_RT_PUSH_IPI
+ #endif
+ 
++
++
++#ifdef CONFIG_GRR_SCHED
++struct grr_rq {
++	struct list_head group[2];
++	unsigned int		grr_nr_running;
++	unsigned int perf_bias;
++	unsigned int def_bias;
++#ifdef CONFIG_SMP
++	raw_spinlock_t		mask_lock;
++	raw_spinlock_t		balance_lock;
++	cpumask_t			temp_mask;
++	unsigned int		lb_timeslice;
++#endif
++};
++#endif
++
++
++
+ /* Real-Time classes' related field in a runqueue: */
+ struct rt_rq {
+ 	struct rt_prio_array	active;
+@@ -1132,6 +1165,9 @@ struct rq {
+ #define UCLAMP_FLAG_IDLE 0x01
+ #endif
+ 
++	#ifdef CONFIG_GRR_SCHED
++	struct grr_rq		grr;
++	#endif
+ 	struct cfs_rq		cfs;
+ 	struct rt_rq		rt;
+ 	struct dl_rq		dl;
+@@ -2541,6 +2577,9 @@ extern struct sched_class __sched_class_lowest[];
+ extern const struct sched_class stop_sched_class;
+ extern const struct sched_class dl_sched_class;
+ extern const struct sched_class rt_sched_class;
++#ifdef CONFIG_GRR_SCHED
++	extern const struct sched_class grr_sched_class;
++#endif
+ extern const struct sched_class fair_sched_class;
+ extern const struct sched_class idle_sched_class;
+ 
+@@ -3186,7 +3225,12 @@ static inline void resched_latency_warn(int cpu, u64 latency) { }
+ extern void init_cfs_rq(struct cfs_rq *cfs_rq);
+ extern void init_rt_rq(struct rt_rq *rt_rq);
+ extern void init_dl_rq(struct dl_rq *dl_rq);
+-
++#ifdef CONFIG_GRR_SCHED
++	extern void init_grr_rq(struct grr_rq *grr_rq);
++	#ifdef CONFIG_SMP
++		extern void init_sched_grr_class(void);
++	#endif
++#endif
+ extern void cfs_bandwidth_usage_inc(void);
+ extern void cfs_bandwidth_usage_dec(void);
+ 
+diff --git a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
+index 456d339be98f..f2be27c44035 100644
+--- a/kernel/sched/syscalls.c
++++ b/kernel/sched/syscalls.c
+@@ -1489,14 +1489,17 @@ SYSCALL_DEFINE1(sched_get_priority_max, int, policy)
+ 	switch (policy) {
+ 	case SCHED_FIFO:
+ 	case SCHED_RR:
+-		ret = MAX_RT_PRIO-1;
+-		break;
++	ret = MAX_RT_PRIO-1;
++	break;
+ 	case SCHED_DEADLINE:
++#ifdef CONFIG_GRR_SCHED
++	case SCHED_GRR:
++#endif
+ 	case SCHED_NORMAL:
+ 	case SCHED_BATCH:
+ 	case SCHED_IDLE:
+ 	case SCHED_EXT:
+-		ret = 0;
++	ret = 0;
+ 		break;
+ 	}
+ 	return ret;
+@@ -1520,6 +1523,9 @@ SYSCALL_DEFINE1(sched_get_priority_min, int, policy)
+ 		ret = 1;
+ 		break;
+ 	case SCHED_DEADLINE:
++#ifdef CONFIG_GRR_SCHED
++	case SCHED_GRR:
++#endif
+ 	case SCHED_NORMAL:
+ 	case SCHED_BATCH:
+ 	case SCHED_IDLE:
