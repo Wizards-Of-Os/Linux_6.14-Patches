@@ -1,0 +1,481 @@
+diff --git a/include/linux/hugetlb.h b/include/linux/hugetlb.h
+index 76a75ec03dd6..6aae9ba0c300 100644
+--- a/include/linux/hugetlb.h
++++ b/include/linux/hugetlb.h
+@@ -189,7 +189,7 @@ static inline pte_t *pte_offset_huge(pmd_t *pmd, unsigned long address)
+ static inline pte_t *pte_alloc_huge(struct mm_struct *mm, pmd_t *pmd,
+ 				    unsigned long address)
+ {
+-	return pte_alloc(mm, pmd) ? NULL : pte_offset_huge(pmd, address);
++	return pte_alloc(mm, pmd, address) ? NULL : pte_offset_huge(pmd, address);
+ }
+ #endif
+ 
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index 1f80baddacc5..442c583d118e 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -2845,7 +2845,7 @@ static inline void mm_inc_nr_ptes(struct mm_struct *mm) {}
+ static inline void mm_dec_nr_ptes(struct mm_struct *mm) {}
+ #endif
+ 
+-int __pte_alloc(struct mm_struct *mm, pmd_t *pmd);
++int __pte_alloc(struct mm_struct *mm, pmd_t *pmd, unsigned long address);
+ int __pte_alloc_kernel(pmd_t *pmd);
+ 
+ #if defined(CONFIG_MMU)
+@@ -3066,13 +3066,15 @@ pte_t *pte_offset_map_rw_nolock(struct mm_struct *mm, pmd_t *pmd,
+ 	pte_unmap(pte);					\
+ } while (0)
+ 
+-#define pte_alloc(mm, pmd) (unlikely(pmd_none(*(pmd))) && __pte_alloc(mm, pmd))
++// Modified these macros to pass the faulting address to __pte_alloc
++
++#define pte_alloc(mm, pmd, address) (unlikely(pmd_none(*(pmd))) && __pte_alloc(mm, pmd, address))
+ 
+ #define pte_alloc_map(mm, pmd, address)			\
+-	(pte_alloc(mm, pmd) ? NULL : pte_offset_map(pmd, address))
++	(pte_alloc(mm, pmd, address) ? NULL : pte_offset_map(pmd, address))
+ 
+ #define pte_alloc_map_lock(mm, pmd, address, ptlp)	\
+-	(pte_alloc(mm, pmd) ?			\
++	(pte_alloc(mm, pmd, address) ?			\
+ 		 NULL : pte_offset_map_lock(mm, pmd, address, ptlp))
+ 
+ #define pte_alloc_kernel(pmd, address)			\
+diff --git a/mm/Makefile b/mm/Makefile
+index 850386a67b3e..44d9c5c03595 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -55,7 +55,7 @@ obj-y			:= filemap.o mempool.o oom_kill.o fadvise.o \
+ 			   mm_init.o percpu.o slab_common.o \
+ 			   compaction.o show_mem.o \
+ 			   interval_tree.o list_lru.o workingset.o \
+-			   debug.o gup.o mmap_lock.o $(mmu-y)
++			   debug.o gup.o mmap_lock.o ept.o $(mmu-y)
+ 
+ # Give 'page_alloc' its own module-parameter namespace
+ page-alloc-y := page_alloc.o
+@@ -146,4 +146,4 @@ obj-$(CONFIG_GENERIC_IOREMAP) += ioremap.o
+ obj-$(CONFIG_SHRINKER_DEBUG) += shrinker_debug.o
+ obj-$(CONFIG_EXECMEM) += execmem.o
+ obj-$(CONFIG_TMPFS_QUOTA) += shmem_quota.o
+-obj-$(CONFIG_PT_RECLAIM) += pt_reclaim.o
++obj-$(CONFIG_PT_RECLAIM) += pt_reclaim.o
+\ No newline at end of file
+diff --git a/mm/debug_vm_pgtable.c b/mm/debug_vm_pgtable.c
+index bc748f700a9e..68c1af9b74ad 100644
+--- a/mm/debug_vm_pgtable.c
++++ b/mm/debug_vm_pgtable.c
+@@ -1246,7 +1246,7 @@ static int __init init_args(struct pgtable_debug_args *args)
+ 	args->start_pmdp = pmd_offset(args->pudp, 0UL);
+ 	WARN_ON(!args->start_pmdp);
+ 
+-	if (pte_alloc(args->mm, args->pmdp)) {
++	if (pte_alloc(args->mm, args->pmdp, args->vaddr)) {
+ 		pr_err("Failed to allocate pte entries\n");
+ 		ret = -ENOMEM;
+ 		goto error;
+diff --git a/mm/ept.c b/mm/ept.c
+new file mode 100644
+index 000000000000..50eec99c2ca4
+--- /dev/null
++++ b/mm/ept.c
+@@ -0,0 +1,169 @@
++// SPDX-License-Identifier: GPL-2.0-only
++
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/miscdevice.h>
++#include <linux/fs.h>
++#include <linux/mm.h>
++#include <linux/sched.h>
++#include <linux/pgtable.h>
++#include <linux/highmem.h>
++#include <asm/tlbflush.h>
++#include <linux/hugetlb.h>
++#include <linux/pfn_t.h>
++
++extern void (*ept_inval_func)(struct mm_struct *mm, unsigned long address);
++
++// Used to store the address space and it is needed by the invalidation function
++static struct address_space *ept_file_mapping;
++
++/*
++ * This function is called from memory.c when a new PTE page is allocated. In that case we need
++ * to invalidate that page from our mapping. That way a page fault will occur when trying to
++ * access these pages, resulting in the device mapping the updated PTE to the address space.
++ */
++static void ept_inval(struct mm_struct *mm, unsigned long address)
++{
++	/*
++	 * We need to modify address such that the correct virtual addresses of the device are
++	 * invalidated. We simply need to notice that the address corresponds to a PMD entry
++	 * pointing to a PTE, while we want a PTE entry that points to physical pages.
++	 * So we need to shift the address by (PMD_SHIFT - PAGE_SHIFT)
++	 * The way we do it below, also zeroes any offset.
++	 */
++	loff_t ept_of = (address >> PMD_SHIFT) << PAGE_SHIFT;
++
++	// No need to do anything if no mapping has happended
++	if (ept_file_mapping)
++		unmap_mapping_range(ept_file_mapping, ept_of, PAGE_SIZE, 1);
++}
++
++/*
++ * The custom fault handler
++ * It walks the page table up to the PMD level. If the translation is not found,
++ * the zero page is mapped.
++ * Then, the physical address of the respective PTE table is mapped to the virtual address page
++ * that caused the fault. That way, the virtual page will map to the PTE page containing the
++ * translations for that virtual page.
++ */
++static vm_fault_t ept_fault(struct vm_fault *vmf)
++{
++	struct vm_area_struct *vma = vmf->vma;
++	struct mm_struct *mm = vma->vm_mm;
++	// The address of the page that caused the fault should be used for the walking
++	unsigned long address = vmf->pgoff << PMD_SHIFT;
++	unsigned long pfn;
++	pgd_t *pgd;
++	p4d_t *p4d;
++	pud_t *pud;
++	pmd_t *pmd;
++	vm_fault_t ret;
++
++	// Page walking
++	pgd = pgd_offset(mm, address);
++	if (pgd_none(*pgd) || pgd_bad(*pgd))
++		goto map_zero;
++
++	// Just returns the pgd if the 5-lvl page table is disabled
++	p4d = p4d_offset(pgd, address);
++	if (p4d_none(*p4d) || p4d_bad(*p4d))
++		goto map_zero;
++
++	pud = pud_offset(p4d, address);
++	if (pud_none(*pud) || pud_bad(*pud))
++		goto map_zero;
++
++	pmd = pmd_offset(pud, address);
++	if (pmd_none(*pmd) || !pmd_present(*pmd))
++		goto map_zero;
++
++	// With this trick we can avoid writing architecture specific code
++	// This works since page frame numbers do not change between architectures.
++	pfn = page_to_pfn(pmd_page(*pmd));
++
++	// Inserting the pfn into the vma of the device for the respected address
++	ret = vmf_insert_mixed(vma, vmf->address, __pfn_to_pfn_t(pfn, PFN_DEV));
++
++	return ret;
++
++map_zero:
++	/* Map the Zero Page */
++	pfn = my_zero_pfn(vmf->address);
++	ret = vmf_insert_mixed(vma, vmf->address, __pfn_to_pfn_t(pfn, PFN_DEV));
++	return ret;
++}
++
++
++static int ept_open(struct inode *inode, struct file *file)
++{
++	// We just need to check whether the user is root
++	if (!capable(CAP_SYS_ADMIN))
++		return -EPERM;
++
++	return 0;
++}
++
++static const struct vm_operations_struct ept_vm_ops = {
++	.fault = ept_fault,
++};
++
++static int ept_mmap(struct file *file, struct vm_area_struct *vma)
++{
++	// Setting the vma so that it uses our custom handlers
++	vma->vm_ops = &ept_vm_ops;
++
++	// Setting flags to allow vmf insertion via the vmf_insert_mixed function.
++	vm_flags_set(vma, VM_MIXEDMAP | VM_DONTEXPAND | VM_DONTDUMP);
++
++	// This is needed for the invalidation
++	ept_file_mapping = file->f_mapping;
++
++	return 0;
++}
++
++
++
++static const struct file_operations ept_fops = {
++	.owner = THIS_MODULE,
++	.open = ept_open,
++	.mmap = ept_mmap,
++};
++
++static struct miscdevice ept_device = {
++	.minor = MISC_DYNAMIC_MINOR,
++	.name = "ept",
++	.fops = &ept_fops,
++};
++
++
++/*
++ * Initializing the device
++ * __init is used by other initializers in more devices, so we included it as well
++ */
++static int __init ept_init(void)
++{
++	int ret;
++
++	// Registering the device
++	ret = misc_register(&ept_device);
++	if (ret)
++		return ret;
++
++	// Make sure the custom ept invalidator is  used
++	ept_inval_func = ept_inval;
++
++	return 0;
++}
++
++static void __exit ept_exit(void)
++{
++	// The device invalidation function should no longer be used
++	ept_inval_func = NULL;
++
++	// Unregistering the device
++	misc_deregister(&ept_device);
++}
++
++module_init(ept_init);
++module_exit(ept_exit);
+diff --git a/mm/filemap.c b/mm/filemap.c
+index e9404290f2c6..4e946b6810b5 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -3541,7 +3541,7 @@ static bool filemap_map_pmd(struct vm_fault *vmf, struct folio *folio,
+ 	}
+ 
+ 	if (pmd_none(*vmf->pmd) && vmf->prealloc_pte)
+-		pmd_install(mm, vmf->pmd, &vmf->prealloc_pte);
++		pmd_install(mm, vmf->pmd, &vmf->prealloc_pte, vmf->address);
+ 
+ 	return false;
+ }
+diff --git a/mm/gup.c b/mm/gup.c
+index 3883b307780e..f60b147ee978 100644
+--- a/mm/gup.c
++++ b/mm/gup.c
+@@ -994,7 +994,7 @@ static struct page *follow_pmd_mask(struct vm_area_struct *vma,
+ 		spin_unlock(ptl);
+ 		split_huge_pmd(vma, pmd, address);
+ 		/* If pmd was left empty, stuff a page table in there quickly */
+-		return pte_alloc(mm, pmd) ? ERR_PTR(-ENOMEM) :
++		return pte_alloc(mm, pmd, address) ? ERR_PTR(-ENOMEM) :
+ 			follow_page_pte(vma, address, pmd, flags, &ctx->pgmap);
+ 	}
+ 	page = follow_huge_pmd(vma, address, pmd, flags, ctx);
+diff --git a/mm/internal.h b/mm/internal.h
+index 20b3535935a3..9bddbbbf7d38 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -385,7 +385,7 @@ void folio_activate(struct folio *folio);
+ void free_pgtables(struct mmu_gather *tlb, struct ma_state *mas,
+ 		   struct vm_area_struct *start_vma, unsigned long floor,
+ 		   unsigned long ceiling, bool mm_wr_locked);
+-void pmd_install(struct mm_struct *mm, pmd_t *pmd, pgtable_t *pte);
++void pmd_install(struct mm_struct *mm, pmd_t *pmd, pgtable_t *pte, unsigned long address);
+ 
+ struct zap_details;
+ void unmap_page_range(struct mmu_gather *tlb,
+diff --git a/mm/memory.c b/mm/memory.c
+index fb7b8dc75167..e3dbb39b95e2 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -90,6 +90,10 @@
+ #include "internal.h"
+ #include "swap.h"
+ 
++/* Definition of the hook variable */
++void (*ept_inval_func)(struct mm_struct *mm, unsigned long addr) = NULL;
++EXPORT_SYMBOL(ept_inval_func);
++
+ #if defined(LAST_CPUPID_NOT_IN_PAGE_FLAGS) && !defined(CONFIG_COMPILE_TEST)
+ #warning Unfortunate NUMA and NUMA Balancing config, growing page-frame for last_cpupid.
+ #endif
+@@ -415,11 +419,11 @@ void free_pgtables(struct mmu_gather *tlb, struct ma_state *mas,
+ 	} while (vma);
+ }
+ 
+-void pmd_install(struct mm_struct *mm, pmd_t *pmd, pgtable_t *pte)
++void pmd_install(struct mm_struct *mm, pmd_t *pmd, pgtable_t *pte, unsigned long address)
+ {
+ 	spinlock_t *ptl = pmd_lock(mm, pmd);
+ 
+-	if (likely(pmd_none(*pmd))) {	/* Has another populated it ? */
++	if (likely(pmd_none(*pmd))) { /* Has another populated it ? */
+ 		mm_inc_nr_ptes(mm);
+ 		/*
+ 		 * Ensure all pte setup (eg. pte page lock and page clearing) are
+@@ -436,18 +440,24 @@ void pmd_install(struct mm_struct *mm, pmd_t *pmd, pgtable_t *pte)
+ 		 */
+ 		smp_wmb(); /* Could be smp_wmb__xxx(before|after)_spin_lock */
+ 		pmd_populate(mm, pmd, *pte);
++
++		// Call the ept invalidator, only if the device is registered
++		if (ept_inval_func)
++			ept_inval_func(mm, address);
++
+ 		*pte = NULL;
+ 	}
+ 	spin_unlock(ptl);
+ }
+ 
+-int __pte_alloc(struct mm_struct *mm, pmd_t *pmd)
++// Modified to also pass the faulting address to the pmd_install
++int __pte_alloc(struct mm_struct *mm, pmd_t *pmd, unsigned long address)
+ {
+ 	pgtable_t new = pte_alloc_one(mm);
+ 	if (!new)
+ 		return -ENOMEM;
+ 
+-	pmd_install(mm, pmd, &new);
++	pmd_install(mm, pmd, &new, address);
+ 	if (new)
+ 		pte_free(mm, new);
+ 	return 0;
+@@ -2211,7 +2221,7 @@ static int insert_pages(struct vm_area_struct *vma, unsigned long addr,
+ 
+ 	/* Allocate the PTE if necessary; takes PMD lock once only. */
+ 	ret = -ENOMEM;
+-	if (pte_alloc(mm, pmd))
++	if (pte_alloc(mm, pmd, addr))
+ 		goto out;
+ 
+ 	while (pages_to_write_in_pmd) {
+@@ -4856,7 +4866,7 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
+ 	 * Use pte_alloc() instead of pte_alloc_map(), so that OOM can
+ 	 * be distinguished from a transient failure of pte_offset_map().
+ 	 */
+-	if (pte_alloc(vma->vm_mm, vmf->pmd))
++	if (pte_alloc(vma->vm_mm, vmf->pmd, addr))
+ 		return VM_FAULT_OOM;
+ 
+ 	/* Use the zero-page for reads */
+@@ -5214,8 +5224,8 @@ vm_fault_t finish_fault(struct vm_fault *vmf)
+ 		}
+ 
+ 		if (vmf->prealloc_pte)
+-			pmd_install(vma->vm_mm, vmf->pmd, &vmf->prealloc_pte);
+-		else if (unlikely(pte_alloc(vma->vm_mm, vmf->pmd)))
++			pmd_install(vma->vm_mm, vmf->pmd, &vmf->prealloc_pte, addr);
++		else if (unlikely(pte_alloc(vma->vm_mm, vmf->pmd, addr)))
+ 			return VM_FAULT_OOM;
+ 	}
+ 
+diff --git a/mm/migrate_device.c b/mm/migrate_device.c
+index 5bd888223cc8..2e2d6ecac51a 100644
+--- a/mm/migrate_device.c
++++ b/mm/migrate_device.c
+@@ -598,7 +598,7 @@ static void migrate_vma_insert_page(struct migrate_vma *migrate,
+ 		goto abort;
+ 	if (pmd_trans_huge(*pmdp) || pmd_devmap(*pmdp))
+ 		goto abort;
+-	if (pte_alloc(mm, pmdp))
++	if (pte_alloc(mm, pmdp, addr))
+ 		goto abort;
+ 	if (unlikely(anon_vma_prepare(vma)))
+ 		goto abort;
+diff --git a/mm/mprotect.c b/mm/mprotect.c
+index 516b1d847e2c..8e0f45c4fffd 100644
+--- a/mm/mprotect.c
++++ b/mm/mprotect.c
+@@ -332,11 +332,11 @@ pgtable_populate_needed(struct vm_area_struct *vma, unsigned long cp_flags)
+  * allocation failures during page faults by kicking OOM and returning
+  * error.
+  */
+-#define  change_pmd_prepare(vma, pmd, cp_flags)				\
++#define  change_pmd_prepare(vma, pmd, cp_flags, address)				\
+ 	({								\
+ 		long err = 0;						\
+ 		if (unlikely(pgtable_populate_needed(vma, cp_flags))) {	\
+-			if (pte_alloc(vma->vm_mm, pmd))			\
++			if (pte_alloc(vma->vm_mm, pmd, address))			\
+ 				err = -ENOMEM;				\
+ 		}							\
+ 		err;							\
+@@ -374,7 +374,7 @@ static inline long change_pmd_range(struct mmu_gather *tlb,
+ again:
+ 		next = pmd_addr_end(addr, end);
+ 
+-		ret = change_pmd_prepare(vma, pmd, cp_flags);
++		ret = change_pmd_prepare(vma, pmd, cp_flags, addr);
+ 		if (ret) {
+ 			pages = ret;
+ 			break;
+@@ -393,7 +393,7 @@ static inline long change_pmd_range(struct mmu_gather *tlb,
+ 				 * cleared; make sure pmd populated if
+ 				 * necessary, then fall-through to pte level.
+ 				 */
+-				ret = change_pmd_prepare(vma, pmd, cp_flags);
++				ret = change_pmd_prepare(vma, pmd, cp_flags, addr);
+ 				if (ret) {
+ 					pages = ret;
+ 					break;
+diff --git a/mm/mremap.c b/mm/mremap.c
+index cff7f552f909..7208e16dff41 100644
+--- a/mm/mremap.c
++++ b/mm/mremap.c
+@@ -674,7 +674,7 @@ unsigned long move_page_tables(struct vm_area_struct *vma,
+ 		}
+ 		if (pmd_none(*old_pmd))
+ 			continue;
+-		if (pte_alloc(new_vma->vm_mm, new_pmd))
++		if (pte_alloc(new_vma->vm_mm, new_pmd, new_addr))
+ 			break;
+ 		if (move_ptes(vma, old_pmd, old_addr, old_addr + extent,
+ 			      new_vma, new_pmd, new_addr, need_rmap_locks) < 0)
+diff --git a/mm/pagewalk.c b/mm/pagewalk.c
+index e478777c86e1..55cd594cbf04 100644
+--- a/mm/pagewalk.c
++++ b/mm/pagewalk.c
+@@ -111,7 +111,7 @@ static int walk_pmd_range(pud_t *pud, unsigned long addr, unsigned long end,
+ 		next = pmd_addr_end(addr, end);
+ 		if (pmd_none(*pmd)) {
+ 			if (has_install)
+-				err = __pte_alloc(walk->mm, pmd);
++				err = __pte_alloc(walk->mm, pmd, addr);
+ 			else if (ops->pte_hole)
+ 				err = ops->pte_hole(addr, next, depth, walk);
+ 			if (err)
+diff --git a/mm/userfaultfd.c b/mm/userfaultfd.c
+index d06453fa8aba..8c81c0b8a74c 100644
+--- a/mm/userfaultfd.c
++++ b/mm/userfaultfd.c
+@@ -789,7 +789,7 @@ static __always_inline ssize_t mfill_atomic(struct userfaultfd_ctx *ctx,
+ 
+ 		dst_pmdval = pmdp_get_lockless(dst_pmd);
+ 		if (unlikely(pmd_none(dst_pmdval)) &&
+-		    unlikely(__pte_alloc(dst_mm, dst_pmd))) {
++		    unlikely(__pte_alloc(dst_mm, dst_pmd, dst_addr))) {
+ 			err = -ENOMEM;
+ 			break;
+ 		}
+@@ -1813,13 +1813,13 @@ ssize_t move_pages(struct userfaultfd_ctx *ctx, unsigned long dst_start,
+ 					err = -ENOENT;
+ 					break;
+ 				}
+-				if (unlikely(__pte_alloc(mm, src_pmd))) {
++				if (unlikely(__pte_alloc(mm, src_pmd, src_addr))) {
+ 					err = -ENOMEM;
+ 					break;
+ 				}
+ 			}
+ 
+-			if (unlikely(pte_alloc(mm, dst_pmd))) {
++			if (unlikely(pte_alloc(mm, dst_pmd, dst_addr))) {
+ 				err = -ENOMEM;
+ 				break;
+ 			}
