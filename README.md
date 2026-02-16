@@ -27,3 +27,7 @@ It performs the following actions:
 - Allocates a user-space buffer.  
 - Calls the `k22tree` syscall with a specified `ne` value.  
 - Prints all process-specific information retrieved in the buffer according to the DFS traversal.
+
+## Patch
+
+The file **'k22tree.patch'** contains all the additions we made in the Linux kernel.
