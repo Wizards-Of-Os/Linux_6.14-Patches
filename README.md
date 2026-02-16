@@ -30,4 +30,4 @@ It performs the following actions:
 
 ## Patch
 
-The file **'k22tree.patch'** contains all the additions we made in the Linux kernel.
+The file **`k22tree.patch`** contains all the additions we made in the Linux kernel.
