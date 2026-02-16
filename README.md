@@ -28,6 +28,13 @@ It performs the following actions:
 - Calls the `k22tree` syscall with a specified `ne` value.  
 - Prints all process-specific information retrieved in the buffer according to the DFS traversal.
 
+
+To compile and run the test program:
+
+```bash
+gcc -o test_k22tree test_k22tree.c && ./test_k22tree
+``` 
+
 ## Patch
 
 The file **`k22tree.patch`** contains all the additions we made to the Linux kernel.
